@@ -1,4 +1,11 @@
-Employee-owned agents, spaces and threads — pilot 0.2.2.
+Employee-owned agents, spaces and threads — pilot 0.2.3.
+
+New in 0.2.3:
+
+- General chat shows a clickable thread card with its creator, initial request, live status and reply count. Existing threads are included automatically; replies stay inside their thread.
+- Thread cards open the conversation and preserve unsent drafts when switching back.
+- Waiting/paused threads explain how to continue: post a clarification or decision and @mention the next agent. Humans can continue the cross-agent conversation in the same thread.
+- No coordinator or database migration is needed for this update. Install the updated desktop app.
 
 0.2.2 hardens the Windows CI interface check with best-effort temporary-profile cleanup, software rendering, a direct local Electron launcher and a bounded timeout. Application context behavior is unchanged from 0.2.1.
 

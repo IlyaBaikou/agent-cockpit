@@ -80,12 +80,19 @@ describe("employee-owned agents and shared spaces", () => {
     const s = await h.call<Snapshot>("sync"); expect(s.threads[0]?.status).toBe("waiting"); expect(s.jobs).toHaveLength(1);
   });
   it("requests a human decision then continues with full context", async () => {
-    const h = setup(), a = await h.agent("A"), space = await h.space();
+    const h = setup(), a = await h.agent("A"), peer = await h.agent("B", bob), space = await h.space();
     const { thread } = await h.post(space, a); const first = await h.claim(a);
     await h.complete(a, first.job, "Approve contract?\nROUTE: human:Bob");
     const waiting = await h.call<Snapshot>("sync", {}, bob); expect(waiting.threads[0]?.status).toBe("waiting"); expect(waiting.notices.at(-1)?.title).toBe("Нужно ваше решение");
-    await h.call("post", { space: space.id, thread: thread.id, content: `Approved @{a:${a.id}}` }, bob);
+    await h.call("post", { space: space.id, thread: thread.id, content: `Approved discussion direction, but no code edits. @{a:${a.id}} Continue with the peer.` }, bob);
     const next = await h.claim(a); expect(next.prompt).toContain("Approved"); expect(next.prompt).toContain("Approve contract?");
+    expect(next.job.mode).toBe("read"); expect(next.job.thread).toBe(thread.id);
+    await h.complete(a, next.job, `Please review the clarified contract\nROUTE: agent:${peer.id}`);
+    const handoff = await h.claim(peer, bob);
+    expect(handoff.job.thread).toBe(thread.id); expect(handoff.job.mode).toBe("read");
+    expect(handoff.prompt).toContain("no code edits"); expect(handoff.prompt).toContain("clarified contract");
+    await h.complete(peer, handoff.job, "Clarification addressed\nROUTE: done", bob);
+    expect((await h.call<Snapshot>("sync")).threads).toHaveLength(1);
   });
   it("rejects broad multi-agent broadcasts in the pilot", async () => {
     const h = setup(), a = await h.agent("A"), b = await h.agent("B"), space = await h.space();

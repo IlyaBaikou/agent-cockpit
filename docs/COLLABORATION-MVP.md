@@ -20,6 +20,8 @@ Upgraded agents get a shared working summary, recent messages, the space's avail
 
 The chain is capped at 12 answers. It pauses for a human when that limit is reached, an approval is needed, or a person added context while an answer was being generated. Reply and explicitly mention the next agent to continue. Stop cancels pending/running work; a stopped agent's late result cannot restart the chain. Completion marks the thread resolved; humans can reopen it.
 
+Since 0.2.3, general chat includes one clickable card for each thread in the space, including existing threads. Cards appear at the thread's creation time with the creator, initial request preview, live status and count of human/agent replies (excluding the initial request and system notices). Agent replies are not copied into general chat. Clicking opens the same shared conversation; navigating back preserves an unsent draft. Humans can clarify, answer or redirect a discussion in the thread. A plain message adds context without invoking a model; @mention one agent to continue or hand off. If an agent is still working, add a plain clarification and wait for the pause, or Stop before invoking a different agent. Write permissions remain separate from conversational agreement.
+
 An unavailable executor is handled by its explicitly configured fallback. Fallbacks are limited to agents owned by the same employee, have a five-hop bound and cannot form configuration cycles. If no fallback is available, an error is recorded in the thread and the requester is notified. Queued requests time out after two minutes; claimed work has a renewable 90-second lease.
 
 ## Writes and trust boundary

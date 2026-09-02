@@ -71,6 +71,23 @@ function renderTopics() {
   $("threads").innerHTML = data.threads.filter((t) => t.space === spaceId).slice().reverse().map((t) => `<button class="thread-card ${t.id === threadId ? "active" : ""}" data-thread="${t.id}"><strong>${esc(t.title)}</strong><div class="meta">${status(t.status)}<span>${data.messages.filter((m) => m.thread === t.id && m.kind !== "system").length} сообщ.</span></div></button>`).join("");
   $("threads").querySelectorAll("[data-thread]").forEach((b) => b.onclick = () => navigate(spaceId, b.dataset.thread));
 }
+function generalThreadCards() {
+  const messages = new Map();
+  for (const m of data.messages) {
+    if (m.space !== spaceId || !m.thread || m.kind === "system") continue;
+    if (!messages.has(m.thread)) messages.set(m.thread, []);
+    messages.get(m.thread).push(m);
+  }
+  return data.threads.filter((t) => t.space === spaceId).map((thread) => {
+    const replies = messages.get(thread.id) ?? [];
+    return { thread, root: replies[0], replies: Math.max(0, replies.length - 1), createdAt: thread.createdAt ?? replies[0]?.createdAt ?? 0 };
+  });
+}
+function renderThreadCard(card) {
+  const t = card.thread;
+  const preview = friendly(card.root?.content ?? "").replace(/```[\s\S]*?```/g, "[Фрагмент кода]").slice(0, 260);
+  return `<article class="message thread-announcement"><span class="avatar">${esc(initials(name(t.owner)))}</span><div class="message-main"><div class="message-head"><strong>${esc(name(t.owner))}</strong><span class="agent-tag">НАЧАЛ ОБСУЖДЕНИЕ</span><time>${time(card.createdAt)}</time></div><button type="button" class="thread-link-card" data-open-thread="${esc(t.id)}" aria-label="Открыть тред: ${esc(t.title)}. ${esc(labels[t.status] ?? t.status)}. Ответов: ${card.replies}"><span class="thread-link-label">↗ ОБСУЖДЕНИЕ В ТРЕДЕ</span><strong>${esc(t.title)}</strong>${preview ? `<span class="thread-link-preview">${esc(preview)}</span>` : ""}<span class="thread-link-meta">${status(t.status)}<span>Ответов: ${card.replies}</span><span class="thread-link-open">Открыть тред →</span></span></button></div></article>`;
+}
 function renderChat() {
   const thread = currentThread(), space = currentSpace();
   $("chat-title").textContent = thread?.title ?? (space ? "Общий чат" : "Добро пожаловать в Agent Hub");
@@ -79,19 +96,28 @@ function renderChat() {
   $("thread-actions").classList.toggle("hidden", !thread);
   $("resolve").textContent = thread?.status === "resolved" ? "↺ Открыть" : "✓ Завершить";
   const messages = data.messages.filter((m) => m.space === spaceId && m.thread === threadId);
+  const cards = threadId ? [] : generalThreadCards();
   const jobs = data.jobs.filter((j) => j.thread === threadId && ["queued", "running"].includes(j.status));
-  $("job-status").classList.toggle("hidden", !jobs.length);
-  $("job-status").textContent = jobs.map((j) => `${name(j.agent)} ${j.status === "queued" ? "ожидает свободного раннера" : "работает с контекстом треда"} · ${j.mode === "write" ? "изменения" : "разбор"}`).join(" · ");
+  const needsPerson = thread && ["waiting", "paused"].includes(thread.status);
+  $("job-status").classList.toggle("hidden", !jobs.length && !needsPerson);
+  $("job-status").textContent = jobs.length ? jobs.map((j) => `${name(j.agent)} ${j.status === "queued" ? "ожидает свободного раннера" : "работает с контекстом треда"} · ${j.mode === "write" ? "изменения" : "разбор"}`).join(" · ") : needsPerson ? "Чтобы продолжить: напишите ответ или уточнение и укажите через @ агента, который должен подхватить разбор." : "";
+  document.querySelector(".composer-hint").innerHTML = thread ? "@агент — продолжить разбор · без @ — добавить контекст · @сотрудник — уведомить <span>⌘ / Ctrl + Enter</span>" : "@сотрудник — уведомить · @агент — создать тред · без @ — обычный чат <span>⌘ / Ctrl + Enter</span>";
   $("send").disabled = !space || !appState.connected;
-  const key = JSON.stringify([spaceId, threadId, messages, data.jobs.filter((j) => j.thread === threadId).map((j) => [j.id,j.status])]);
+  const key = JSON.stringify([spaceId, threadId, messages, cards, data.employees, data.agents.map((a) => [a.id, a.name, a.owner]), data.jobs.filter((j) => j.thread === threadId).map((j) => [j.id,j.status])]);
   if (key === renderKey) return;
   const wasNearBottom = $("messages").scrollHeight - $("messages").scrollTop - $("messages").clientHeight < 110;
   const switched = !renderKey; renderKey = key;
-  $("messages").innerHTML = messages.map((m) => {
+  const entries = [...messages.map((message) => ({ message, createdAt: message.createdAt, id: message.id })),
+    ...cards.map((card) => ({ card, createdAt: card.createdAt, id: card.thread.id }))]
+    .sort((a, b) => a.createdAt - b.createdAt);
+  $("messages").innerHTML = entries.map((entry) => {
+    if (entry.card) return renderThreadCard(entry.card);
+    const m = entry.message;
     if (m.kind === "system") return `<div class="system">${inline(m.content)}</div>`;
     const agent = data.agents.find((a) => a.id === m.author);
     return `<article class="message ${m.kind}"><span class="avatar">${esc(initials(name(m.author)))}</span><div class="message-main"><div class="message-head"><strong>${esc(name(m.author))}</strong>${agent ? `<span class="agent-tag">АГЕНТ · ${esc(name(agent.owner))}</span>` : ""}<time>${time(m.createdAt)}</time></div><div class="message-body">${markdown(m.content)}</div></div></article>`;
   }).join("") || `<div class="empty"><div class="symbol">${space ? "↗" : "✳"}</div><h3>${space ? "Начните с вопроса" : "Команда начинается со спейса"}</h3><p>${space ? "Напишите коллеге или вызовите агента через @. Он увидит историю этого треда и сможет подключить другого агента." : "Создайте пространство, добавьте коллег и подключите своих агентов. Никаких заданных ролей."}</p></div>`;
+  $("messages").querySelectorAll("[data-open-thread]").forEach((button) => button.onclick = () => navigate(spaceId, button.dataset.openThread));
   const contextJobs = data.jobs.filter((j) => j.thread === threadId && j.contextStats);
   if (thread && (thread.memory || contextJobs.length)) {
     const panel = document.createElement("details"); panel.className = "context-memory";

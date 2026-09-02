@@ -15,6 +15,38 @@ app.whenReady().then(async () => {
     window.webContents.on("render-process-gone", (_event, details) => { console.error("Renderer exited", details.reason); app.exit(1); });
     await window.loadFile(resolve(__dirname, "../ui/hub.html"));
     console.log("CONTEXT_UI_PAGE_LOADED");
+    const cards = await window.webContents.executeJavaScript(`(() => {
+      const saved = structuredClone(data);
+      const check = (condition, detail) => { if (!condition) throw new Error(detail); };
+      navigate('demo-space', null);
+      document.getElementById('composer').value = 'Черновик общего чата';
+      let card = document.querySelector('[data-open-thread="demo-thread"]');
+      check(card && card.innerText.includes('Ответов: 2'), 'General chat must show the existing thread and two replies');
+      check(!document.getElementById('messages').innerText.includes('старые клиенты продолжат работать'), 'Agent replies must stay inside the thread');
+      for (const state of ['working', 'waiting', 'paused', 'resolved', 'error']) {
+        data.threads[0].status = state; renderChat();
+        check(document.querySelector('[data-open-thread="demo-thread"]').innerText.includes(labels[state]), 'Live card status did not refresh: ' + state);
+      }
+      data.messages.push({ id: 'human-clarification', space: 'demo-space', thread: 'demo-thread', kind: 'human', author: 'peer', content: 'Уточнение: сохраняем старый формат.', createdAt: Date.now() });
+      data.threads.push({ id: 'foreign-thread', space: 'other-space', owner: 'peer', title: 'Hidden other-space topic', status: 'open', createdAt: Date.now() });
+      renderChat();
+      check(document.querySelectorAll('[data-open-thread]').length === 1, 'Duplicate or cross-space card');
+      check(document.querySelector('[data-open-thread="demo-thread"]').innerText.includes('Ответов: 3'), 'Human replies must count');
+      data.threads[0].title = '<img src=x onerror="throw 1">'; renderChat();
+      check(!document.querySelector('#messages img'), 'Thread title must be escaped');
+      data = saved; renderChat();
+      document.querySelector('[data-open-thread="demo-thread"]').click();
+      check(threadId === 'demo-thread', 'Card must open its own thread');
+      check(document.querySelectorAll('[data-open-thread]').length === 0, 'Cards must not appear inside the thread');
+      check(document.getElementById('job-status').innerText.includes('укажите через @'), 'Human continuation guidance missing');
+      check(document.querySelectorAll('article.message').length === 3, 'Thread history missing');
+      navigate('demo-space', null);
+      check(document.getElementById('composer').value === 'Черновик общего чата', 'Navigation must preserve the general-chat draft');
+      document.getElementById('composer').value = '';
+      return { existingThreadCard: true, liveStatuses: true, replyCount: true, scoped: true, escaped: true, navigation: true, draftPreserved: true };
+    })()`);
+    console.log("THREAD_CARD_UI_SMOKE_OK", cards);
+    if (process.argv[2]) writeFileSync(resolve(process.argv[2]).replace(/\.png$/, '-general.png'), (await window.webContents.capturePage()).toPNG());
     const result = await window.webContents.executeJavaScript(`
       navigate('demo-space', 'demo-thread');
       const panel = document.querySelector('.context-memory');
