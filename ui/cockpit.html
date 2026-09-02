@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:" />
+    <title>Agent Cockpit</title>
+    <link rel="stylesheet" href="./cockpit.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">A</span>
+          <div><strong>Agent Cockpit</strong><small>Shared engineering room</small></div>
+        </div>
+        <div class="topbar-actions">
+          <span id="connection-pill" class="pill muted">Connecting</span>
+          <button id="settings-button" class="icon-button" aria-label="Settings">⚙</button>
+          <button id="new-button" class="primary-button">New thread</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="thread-panel">
+          <div class="panel-heading"><span>Threads</span><span id="thread-count" class="count">0</span></div>
+          <div id="thread-list" class="thread-list"></div>
+        </aside>
+
+        <section class="conversation-panel">
+          <div id="empty-state" class="empty-state">
+            <div class="empty-orbit"><span>C</span><span>↔</span><span>Cl</span></div>
+            <h1>One room, two agents</h1>
+            <p>Start a technical thread. Codex and the frontend agent will inspect their local repositories, exchange proposals, and pause when a human decision is needed.</p>
+            <button id="empty-new-button" class="primary-button">Start the first thread</button>
+          </div>
+
+          <div id="conversation" class="conversation hidden">
+            <div class="conversation-header">
+              <div><span id="conversation-id" class="eyebrow"></span><h1 id="conversation-title"></h1></div>
+              <button id="close-thread-button" class="quiet-button">Close thread</button>
+            </div>
+            <div id="operator-banner" class="operator-banner hidden">
+              <span class="operator-icon">!</span>
+              <div><strong>Human decision needed</strong><p>The agents paused here. Your answer will resume the discussion.</p></div>
+            </div>
+            <div id="message-list" class="message-list"></div>
+            <form id="reply-form" class="composer">
+              <textarea id="reply-content" rows="3" placeholder="Add context, answer a question, or ask the agents to continue…"></textarea>
+              <div class="composer-controls">
+                <div class="field-inline"><label for="reply-target">Send to</label><select id="reply-target"><option value="codex">Codex</option><option value="claude">Frontend agent</option></select></div>
+                <div class="field-inline"><label for="reply-mode">Access</label><select id="reply-mode"><option value="read">Discuss</option><option value="write">Implement</option></select></div>
+                <div class="field-inline"><label for="reply-turns">Turns</label><select id="reply-turns"><option>2</option><option selected>4</option><option>6</option><option>8</option><option>12</option></select></div>
+                <span class="spacer"></span>
+                <button id="send-button" class="primary-button" type="submit">Send</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <aside class="status-panel">
+          <div class="panel-heading">Local team</div>
+          <div id="agent-cards"></div>
+          <div class="section-divider"></div>
+          <div class="panel-heading">Workspace</div>
+          <div id="repository-list" class="tag-list"></div>
+          <div class="section-divider"></div>
+          <div class="panel-heading">Connection</div>
+          <p id="connection-detail" class="small-copy"></p>
+          <p id="connection-url" class="mono-copy"></p>
+        </aside>
+      </main>
+    </div>
+
+    <div id="new-modal" class="modal-backdrop hidden">
+      <form id="new-form" class="modal-card">
+        <div class="modal-header"><div><span class="eyebrow">NEW DISCUSSION</span><h2>Start an engineering thread</h2></div><button type="button" class="modal-close">×</button></div>
+        <label class="field"><span>Question or task</span><textarea id="new-topic" required rows="5" placeholder="Describe the integration question, include the expected result and any constraints…"></textarea></label>
+        <div class="field-grid">
+          <label class="field"><span>Codex repository</span><select id="new-codex-repo"></select></label>
+          <label class="field"><span>Frontend repository</span><select id="new-claude-repo"></select></label>
+          <label class="field"><span>First responder</span><select id="new-target"><option value="codex">Codex</option><option value="claude">Frontend agent</option></select></label>
+          <label class="field"><span>Automatic turns</span><select id="new-turns"><option>2</option><option selected>4</option><option>6</option><option>8</option><option>12</option></select></label>
+        </div>
+        <div class="access-choice"><label><input type="radio" name="new-mode" value="read" checked /><span><strong>Discuss only</strong><small>Read source and docs, no file edits</small></span></label><label><input type="radio" name="new-mode" value="write" /><span><strong>Allow implementation</strong><small>Work in isolated Git worktrees</small></span></label></div>
+        <div class="modal-actions"><button type="button" class="quiet-button modal-cancel">Cancel</button><button type="submit" class="primary-button">Start thread</button></div>
+      </form>
+    </div>
+
+    <div id="settings-modal" class="modal-backdrop hidden">
+      <form id="settings-form" class="modal-card settings-card">
+        <div class="modal-header"><div><span class="eyebrow">LOCAL SETUP</span><h2 id="settings-title">Connect your agents</h2></div><button type="button" class="modal-close settings-close">×</button></div>
+        <p class="modal-intro">Choose which agents run on this computer. Each one uses its own installed app and account.</p>
+        <div class="agent-choice-grid">
+          <label class="agent-choice"><input id="enable-codex" type="checkbox" value="codex" /><span class="choice-logo codex-logo">C</span><span><strong>Codex</strong><small id="codex-setup-status">Checking…</small></span></label>
+          <label class="agent-choice"><input id="enable-claude" type="checkbox" value="claude" /><span class="choice-logo claude-logo">Cl</span><span><strong>Frontend agent</strong><small id="claude-setup-status">Checking…</small></span></label>
+        </div>
+        <label class="field"><span>Frontend executor</span><select id="claude-executor"><option value="auto">Auto — Claude Code, then Cursor CLI</option><option value="claude">Claude Code</option><option value="cursor">Cursor CLI</option></select></label>
+        <label class="toggle-row"><input id="allow-write" type="checkbox" /><span><strong>Allow implementation jobs</strong><small>Agents may edit files only in isolated worktrees. Commits and pushes stay disabled.</small></span></label>
+        <label id="advertise-field" class="field"><span>Shareable HTTPS address <em>optional for local testing</em></span><input id="advertise-url" type="url" placeholder="https://your-machine.tailnet.ts.net" /></label>
+        <div id="invite-box" class="invite-box hidden"><div><strong>Peer pairing code</strong><small>Send this secret once to the second developer.</small></div><button id="copy-invite" type="button" class="quiet-button">Copy code</button></div>
+        <p id="settings-error" class="form-error hidden"></p>
+        <div class="modal-actions"><button id="refresh-health" type="button" class="quiet-button">Check again</button><button type="submit" class="primary-button">Save and start</button></div>
+      </form>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script type="module" src="./cockpit.js"></script>
+  </body>
+</html>

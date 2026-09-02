@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.DS_Store
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+tmp/
+worktrees/
+runner-worktrees/
+.agent-hub-local/
+.agent-hub-worktrees/
+coverage/
+release/
+installers/
+.publish-export/

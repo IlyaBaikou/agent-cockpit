@@ -1,0 +1,4 @@
+{
+  "codex": { "label": "Legacy Codex", "provider": "openai", "role": "code reviewer" },
+  "claude": { "label": "Legacy Claude", "provider": "anthropic", "role": "code reviewer" }
+}

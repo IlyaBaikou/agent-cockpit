@@ -1,0 +1,56 @@
+{
+  "name": "@animaplay/agent-hub",
+  "version": "0.2.0",
+  "description": "Employee-owned agents, shared spaces and collaborative threads",
+  "author": "AnimaPlay",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "main": "dist/src/desktop.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "bundle:frontend": "npm run build && node scripts/build-frontend-runner-bundle.mjs",
+    "check": "npm run typecheck && npm run build && npm test",
+    "claude:login": "tsx src/login-claude.ts",
+    "cli": "tsx src/cli.ts",
+    "cockpit": "npm run build && electron .",
+    "cockpit:legacy": "npm run build && electron dist/src/cockpit.js",
+    "desktop:pack": "npm run build && electron-builder --dir --publish never",
+    "desktop:dist": "npm run build && electron-builder --publish never",
+    "dev": "tsx src/index.ts",
+    "doctor": "tsx src/doctor.ts",
+    "hub": "tsx src/server.ts",
+    "hub:ctl": "tsx src/control-cli.ts",
+    "start": "node dist/src/server.js",
+    "runner": "tsx src/runner.ts",
+    "runner:setup": "tsx src/setup-runner.ts",
+    "runner:doctor": "tsx src/runner-doctor.ts",
+    "runner:slack-proof": "tsx src/slack-desktop-proof.ts",
+    "slack:gateway": "tsx src/slack-gateway.ts",
+    "slack:doctor": "tsx src/slack-gateway-doctor.ts",
+    "slack:setup": "tsx src/setup-slack-gateway.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.4.0",
+    "cross-spawn": "^7.0.6",
+    "dotenv": "^17.2.2",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^24.5.2",
+    "@types/pg": "^8.23.1",
+    "electron": "^44.1.1",
+    "electron-builder": "^26.15.3",
+    "pg-mem": "^3.0.14",
+    "railway": "^3.11.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
