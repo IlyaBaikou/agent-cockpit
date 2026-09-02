@@ -6,6 +6,7 @@ export type AgentRequest = {
   mode?: "read" | "write";
   signal?: AbortSignal;
   protocol?: "collaboration";
+  purpose?: "summary";
 };
 
 export type AgentResult = {

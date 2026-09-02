@@ -98,7 +98,7 @@ const manifest = {
   bundle: bundleName,
   runnerId: "frontend-claude",
   agent: "claude",
-  hubUrl: "https://agent-hub-production-e2ba.up.railway.app",
+  hubUrl: process.env.HUB_URL ?? "http://127.0.0.1:4317",
   sourceCommit: git.status === 0 ? git.stdout.trim() : "unknown",
   sourceDirty: gitStatus.status !== 0 || Boolean(gitStatus.stdout.trim()),
   builtAt: new Date().toISOString(),

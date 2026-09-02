@@ -59,7 +59,7 @@ try {
   const serverUrl = argument("hub-url") ?? (nonInteractive ? "http://127.0.0.1:4317" : await answer("Hub URL", "http://127.0.0.1:4317"));
   const slackEnabled = flag("slack") || (!flag("no-slack") && (nonInteractive || (await yesNo("Use Slack Desktop relay", true))));
   const slackChannel = slackEnabled
-    ? argument("slack-channel") ?? (nonInteractive ? "C0BSWGTLCK0" : await answer("Slack channel id", "C0BSWGTLCK0"))
+    ? argument("slack-channel") ?? (nonInteractive ? "" : await answer("Slack channel id", ""))
     : undefined;
   const slackPublishResponses = slackEnabled && flag("slack-post");
   const slackReadCommands = slackEnabled && flag("slack-read");

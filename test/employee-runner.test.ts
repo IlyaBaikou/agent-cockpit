@@ -28,7 +28,7 @@ async function fixture() {
   const space = await client.call<Space>("space", { name: "Test" });
   const post = (mode = "read") => client.call<{ thread: Thread }>("post", { space: space.id, content: `@{a:${agent.id}} Test`, mode });
   const snapshot = () => client.call<Snapshot>("sync");
-  return { dir, client, agent, post, snapshot };
+  return { dir, client, agent, post, snapshot, store, space };
 }
 async function until(check: () => Promise<boolean>, timeout = 8000): Promise<void> {
   const start = Date.now();
@@ -90,4 +90,53 @@ it("cancels a spawned CLI process on AbortSignal", async () => {
   const run = runProcess(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { signal: controller.signal, timeoutMs: 10_000 });
   setTimeout(() => controller.abort(), 100);
   await expect(run).rejects.toThrow("stopped");
+});
+
+it("compacts once, preserves originals for retrieval and records compaction overhead", async () => {
+  const f = await fixture(); let summaryRuns = 0, taskRuns = 0, archivePath = "";
+  const adapter: AgentAdapter = { id: "codex", healthCheck: async () => "ready", run: async (request) => {
+    // On Windows the argument is a pointer to the exact same request.
+    const file = request.prompt.match(/UTF-8 file (".*?")\./)?.[1];
+    const prompt = file ? await readFile(JSON.parse(file) as string, "utf8") : request.prompt;
+    if (request.purpose === "summary") {
+      summaryRuns++; expect(request.mode).toBe("read");
+      return { agent: "codex", content: JSON.stringify({ summary: "Old proposals are not approved. Endpoint must remain unchanged [long-0].", citations: ["long-0"] }) };
+    }
+    taskRuns++; expect(prompt).toContain("Endpoint must remain unchanged"); expect(prompt).toContain("Newest human constraint: do not write");
+    archivePath = JSON.parse(prompt.match(/Read-only thread archive: (".*?")\./)![1]!) as string;
+    const index = JSON.parse(await readFile(join(archivePath, "index.json"), "utf8")) as { id: string; file: string }[];
+    const original = index.find((m) => m.id === "long-0")!;
+    expect(await readFile(join(archivePath, original.file), "utf8")).toContain("Full original evidence");
+    return { agent: "codex", content: "Reviewed\nROUTE: done" };
+  } };
+  const runner = new EmployeeRunner(f.client, f.agent, "test-device", join(f.dir, "worktrees"), { check: async () => "ready", adapter: () => adapter });
+  try {
+    const { thread } = await f.post();
+    await f.store.transact((s) => {
+      for (let i = 0; i < 22; i++) s.messages.push({ id: `long-${i}`, space: f.space.id, thread: thread.id, author: "Owner",
+        kind: i === 21 ? "human" : "agent", content: i === 21 ? "Newest human constraint: do not write" : `Full original evidence ${i}. ${"contract detail ".repeat(140)}`, createdAt: i });
+    });
+    runner.start(); await until(async () => (await f.snapshot()).threads[0]?.status === "resolved");
+    const s = await f.snapshot(); expect(summaryRuns).toBe(1); expect(taskRuns).toBe(1);
+    expect(s.threads[0]?.memory?.citations).toEqual(["long-0"]);
+    expect(s.jobs[0]?.contextStats?.compacted).toBe(true); expect(s.jobs[0]?.contextStats?.summaryInputChars).toBeGreaterThan(1000);
+    expect(s.jobs[0]!.contextStats!.promptChars).toBeLessThan(s.jobs[0]!.contextStats!.historyChars);
+    await until(async () => { try { await readFile(join(archivePath, "index.json")); return false; } catch { return true; } });
+  } finally { runner.stop(); await rm(f.dir, { recursive: true, force: true }); }
+});
+
+it("falls back to original excerpts when the summary is malformed", async () => {
+  const f = await fixture(); let runs = 0;
+  const adapter: AgentAdapter = { id: "codex", healthCheck: async () => "ready", run: async (request) => {
+    runs++; return { agent: "codex", content: request.purpose === "summary" ? "invalid JSON" : "Answer\nROUTE: done" };
+  } };
+  const runner = new EmployeeRunner(f.client, f.agent, "test-device", join(f.dir, "worktrees"), { check: async () => "ready", adapter: () => adapter });
+  try {
+    const { thread } = await f.post();
+    await f.store.transact((s) => { for (let i = 0; i < 22; i++) s.messages.push({ id: `bad-${i}`, thread: thread.id, space: f.space.id,
+      author: "Owner", kind: "agent", createdAt: i, content: "Context ".repeat(300) }); });
+    runner.start(); await until(async () => (await f.snapshot()).threads[0]?.status === "resolved");
+    const s = await f.snapshot(); expect(runs).toBe(2); expect(s.threads[0]?.memory).toBeUndefined();
+    expect(s.jobs[0]?.contextStats?.compacted).toBe(false); expect(s.messages.filter((m) => m.id.startsWith("bad-"))).toHaveLength(22);
+  } finally { runner.stop(); await rm(f.dir, { recursive: true, force: true }); }
 });

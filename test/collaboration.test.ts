@@ -11,6 +11,7 @@ import { collaborationHttp } from "../src/collab/http.js";
 import { CollaborationClient, hubUrl } from "../src/collab/client.js";
 import { pendingNotices } from "../src/collab/notifications.js";
 import type { Agent, Job, Snapshot, Space, Thread } from "../src/collab/model.js";
+import { compactionPlan, type ContextPacket } from "../src/collab/context.js";
 
 const alice = "alice-test-credential-0000000000", bob = "bob-test-credential-000000000000";
 function setup() {
@@ -149,6 +150,59 @@ describe("fallbacks, leases and write boundaries", () => {
     const h = setup(), space = await h.space();
     await expect(h.call("post", { space: space.id, content: "@{a:unknown}" })).rejects.toThrow();
     expect((await h.call<Snapshot>("sync")).messages).toHaveLength(0);
+  });
+});
+
+describe("shared thread context", () => {
+  async function history(h: ReturnType<typeof setup>, thread: Thread, space: Space) {
+    await h.store.transact((s) => {
+      for (let i = 0; i < 24; i++) s.messages.push({ id: `context-${i}`, space: space.id, thread: thread.id,
+        author: "Alice", kind: i === 23 ? "human" : "agent", content: i === 23 ? "Latest instruction: no writes."
+          : `Proposed contract ${i}: ${"evidence ".repeat(220)}`, createdAt: i });
+    });
+  }
+  it("shares a validated checkpoint across providers without deleting history or leaking to outsiders", async () => {
+    const h = setup(), a = await h.agent("A"), b = await h.agent("B", alice, { executor: "claude" }), space = await h.space([]);
+    const { thread } = await h.post(space, a); await history(h, thread, space);
+    const first = await h.call<{ job: Job; context: ContextPacket; prompt: string }>("claim", { agent: a.id, device: a.device, contextVersion: 1 });
+    expect(first.prompt).not.toContain("Proposed contract"); expect(first.context.messages.length).toBeGreaterThan(24);
+    const plan = compactionPlan(first.context)!;
+    const memory = { through: plan.through, sourceHash: plan.sourceHash, summary: "Contract proposal remains unapproved.", citations: [plan.ids[0]] };
+    const complete = { job: first.job.id, lease: first.job.lease, device: a.device, content: `Review\nROUTE: agent:${b.id}`, memory };
+    await h.call("complete", complete); await h.call("complete", complete);
+    const next = await h.call<{ context: ContextPacket }>("claim", { agent: b.id, device: b.device, contextVersion: 1 });
+    expect(next.context.memory?.summary).toBe(memory.summary);
+    expect(next.context.messages.some((m) => m.content.includes("Proposed contract 0"))).toBe(true);
+    const s = await h.call<Snapshot>("sync"); expect(s.threads[0]?.memory?.agent).toBe(a.id);
+    expect((await h.call<Snapshot>("sync", {}, bob)).threads).toHaveLength(0);
+  });
+  it("does not accept a checkpoint from a stale, stopped or forged job", async () => {
+    const h = setup(), a = await h.agent("A"), space = await h.space();
+    const { thread } = await h.post(space, a); await history(h, thread, space);
+    const { job, context } = await h.call<{ job: Job; context: ContextPacket }>("claim", { agent: a.id, device: a.device, contextVersion: 1 });
+    const plan = compactionPlan(context)!;
+    await h.call("post", { space: space.id, thread: thread.id, content: "Correction: new constraints" });
+    expect(await h.call("lease", { job: job.id, lease: job.lease, device: a.device, contextRevision: job.revision })).toEqual({ cancelled: true });
+    await h.call("complete", { job: job.id, lease: job.lease, device: a.device, content: "Old answer\nROUTE: done",
+      memory: { through: plan.through, sourceHash: plan.sourceHash, summary: "Old summary", citations: [plan.ids[0]] } });
+    const s = await h.call<Snapshot>("sync"); expect(s.threads[0]?.memory).toBeUndefined(); expect(s.threads[0]?.status).toBe("waiting");
+  });
+  it("backs off failed compaction instead of paying for it on every handoff", async () => {
+    const h = setup(), a = await h.agent("A"), b = await h.agent("B"), space = await h.space();
+    const { thread } = await h.post(space, a); await history(h, thread, space);
+    const { job } = await h.call<{ job: Job }>("claim", { agent: a.id, device: a.device, contextVersion: 1 });
+    await h.call("complete", { job: job.id, lease: job.lease, device: a.device, content: `Next\nROUTE: agent:${b.id}`,
+      memory: { summary: "Forged", through: "other-thread", sourceHash: "bad", citations: [] },
+      contextStats: { historyChars: 40000, promptChars: 20000, summaryInputChars: 30000, summaryOutputChars: 0, memoryReused: false, compacted: false } });
+    const next = await h.call<{ context: ContextPacket }>("claim", { agent: b.id, device: b.device, contextVersion: 1 });
+    expect(next.context.memory).toBeUndefined(); expect(next.context.skipCompaction).toBe(true); expect(compactionPlan(next.context)).toBeUndefined();
+  });
+  it("allows upgraded runners to retrieve long threads but keeps the legacy guard", async () => {
+    const h = setup(), a = await h.agent("A"), space = await h.space(); const { thread } = await h.post(space, a);
+    await h.store.transact((s) => { s.messages.push({ id: "large", space: space.id, thread: thread.id, kind: "agent", author: a.id, content: "x".repeat(220000), createdAt: 1 }); });
+    await expect(h.claim(a)).rejects.toThrow("Обновите приложение");
+    const next = await h.call<{ context: ContextPacket; prompt: string }>("claim", { agent: a.id, device: a.device, contextVersion: 1 });
+    expect(next.context.messages.at(-1)?.content.length).toBe(220000); expect(next.prompt.length).toBeLessThan(5000);
   });
 });
 

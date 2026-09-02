@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { secureTokenMatch, type ControlCredential } from "../control-auth.js";
 import { CollabError, field, mentions, requireValue, type Agent, type Job, type Message, type Snapshot, type Space, type State, type Thread } from "./model.js";
 import type { StateStore } from "./store.js";
+import { acceptMemory, validMemory, type ContextPacket, type ContextStats } from "./context.js";
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 const secret = (): string => randomBytes(32).toString("base64url");
@@ -154,11 +155,18 @@ export class CollaborationService {
         const thread = this.thread(s, actor, job.thread);
         job.status = "running"; job.lease = secret(); job.expiresAt = this.now() + LEASE;
         thread.status = "working";
+        if (b.contextVersion === 1) {
+          const context = this.context(s, job);
+          const through = context.messages.at(-1)?.id;
+          if (through) job.contextThrough = through;
+          return { job, prompt: this.prompt(s, job, true), agent, context };
+        }
         return { job, prompt: this.prompt(s, job), agent };
       }
       case "lease": {
         const job = this.leased(s, actor, b, true);
         if (!this.active(job)) return { cancelled: true };
+        if (typeof b.contextRevision === "number" && s.threads.find((t) => t.id === job.thread)?.revision !== b.contextRevision) return { cancelled: true };
         job.expiresAt = this.now() + LEASE;
         const agent = s.agents.find((a) => a.id === job.agent)!;
         agent.seenAt = this.now();
@@ -173,6 +181,19 @@ export class CollaborationService {
         const match = /(?:^|\n)ROUTE: (agent:[a-zA-Z0-9._-]+|human:[a-zA-Z0-9._-]+|done|unable)\s*$/.exec(content);
         const visible = match ? content.slice(0, match.index).trim() : content;
         const thread = s.threads.find((t) => t.id === job.thread)!;
+        if (job.contextThrough && thread.revision === job.revision) {
+          const memory = acceptMemory(this.context(s, job), b.memory, job.agent, this.now());
+          if (memory) thread.memory = memory;
+        }
+        if (b.contextStats && typeof b.contextStats === "object") {
+          const stats = b.contextStats as ContextStats;
+          if ([stats.historyChars, stats.promptChars, stats.summaryInputChars, stats.summaryOutputChars]
+            .every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 100_000_000)
+            && typeof stats.memoryReused === "boolean" && typeof stats.compacted === "boolean") job.contextStats = {
+              historyChars: stats.historyChars, promptChars: stats.promptChars, summaryInputChars: stats.summaryInputChars,
+              summaryOutputChars: stats.summaryOutputChars, memoryReused: stats.memoryReused, compacted: stats.compacted,
+            };
+        }
         job.status = "done";
         this.message(s, thread.space, thread.id, job.agent, "agent", visible || "Обработка завершена.");
         this.notice(s, job.requestedBy, `${this.name(s, job.agent)} ответил`, visible.slice(0, 160), thread.space, thread.id);
@@ -317,12 +338,22 @@ export class CollaborationService {
       notices: s.notices.filter((n) => n.employee === actor && ids.has(n.space)), sequence: s.sequence,
     };
   }
-  private prompt(s: State, job: Job): string {
+  private context(s: State, job: Job): ContextPacket {
+    let messages = s.messages.filter((m) => m.thread === job.thread);
+    if (job.contextThrough) messages = messages.slice(0, messages.findIndex((m) => m.id === job.contextThrough) + 1);
+    const memory = validMemory(messages, s.threads.find((t) => t.id === job.thread)?.memory);
+    const failed = s.jobs.filter((j) => j.thread === job.thread && j.contextStats
+      && j.contextStats.summaryInputChars > 0 && !j.contextStats.compacted).at(-1);
+    const failedIndex = failed ? messages.findIndex((m) => m.id === failed.contextThrough) : -1;
+    const skipCompaction = failedIndex >= 0 && messages.slice(failedIndex + 1).filter((m) => m.kind !== "system").length < 8;
+    return { version: 1, messages, ...(memory ? { memory } : {}), ...(skipCompaction ? { skipCompaction } : {}) };
+  }
+  private prompt(s: State, job: Job, compact = false): string {
     const thread = s.threads.find((t) => t.id === job.thread)!;
     const space = s.spaces.find((sp) => sp.id === thread.space)!;
     const agent = s.agents.find((a) => a.id === job.agent)!;
-    const transcript = s.messages.filter((m) => m.thread === thread.id).map((m) => `[${m.kind} ${this.name(s, m.author)}]\n${m.content}`).join("\n\n");
-    requireValue(transcript.length < 200_000, "Тред превышает лимит контекста пилота. Начните новый тред с итогами.");
+    const transcript = compact ? "" : s.messages.filter((m) => m.thread === thread.id).map((m) => `[${m.kind} ${this.name(s, m.author)}]\n${m.content}`).join("\n\n");
+    requireValue(compact || transcript.length < 200_000, "Тред превышает лимит контекста старого раннера. Обновите приложение для компактной памяти тредов.");
     return [
       `You are ${agent.name}, owned by ${this.name(s, agent.owner)}. Your agent ID is ${agent.id}.`,
       `Your owner-provided context: ${agent.description}`, `Space: ${space.name}. Thread: ${thread.title}.`,
@@ -332,8 +363,8 @@ export class CollaborationService {
       `Available agents: ${s.agents.filter((a) => space.members.includes(a.owner) && a.enabled).map((a) => `${a.name} [${a.id}] (${this.name(s, a.owner)}): ${a.description}`).join("\n")}`,
       `Humans: ${s.employees.filter((e) => space.members.includes(e.id)).map((e) => `${e.name} [${e.id}]`).join(", ")}`,
       "End with exactly one final routing line (not inside a code block): ROUTE: agent:<ID> to ask a specific peer, ROUTE: human:<ID> for a decision/approval, ROUTE: unable if you cannot process this task, or ROUTE: done if the discussion is settled. A routing line does not grant extra permissions. Use the actual ID, not a provider name. Avoid repeated acknowledgements or endless ping-pong.",
-      `Current mode: ${job.mode}. Replies remaining in this chain: ${job.remaining}.`,
-      "--- TRANSCRIPT ---", transcript,
+      ...(compact ? [] : ["--- TRANSCRIPT ---", transcript,
+        `Current mode: ${job.mode}. Replies remaining in this chain: ${job.remaining}.`]),
     ].join("\n\n");
   }
 }

@@ -1,4 +1,13 @@
-Employee-owned agents, spaces and threads — pilot 0.2.0.
+Employee-owned agents, spaces and threads — pilot 0.2.1.
+
+New in 0.2.1:
+
+- Shared, cited working summaries for long threads, compatible with Codex, Claude Code and Cursor CLI.
+- Recent messages plus on-demand original code/diffs; full human-visible history is retained.
+- Collapsible thread-memory panel and honest context-size diagnostics, including summarization overhead (characters, not billed tokens).
+- Validated source cursors/hashes, failed-summary backoff and cancellation/revision checks before task execution.
+- Temporary read-only task files avoid oversized Windows command arguments.
+- Public source repository and publicly downloadable pilot installers. Update both coordinator and desktop apps for shared checkpoints.
 
 - Employees can connect multiple named Codex, Claude Code or Cursor CLI agents.
 - Shared spaces, human chat, threaded agent discussions and explicit mentions.

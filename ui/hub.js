@@ -92,6 +92,14 @@ function renderChat() {
     const agent = data.agents.find((a) => a.id === m.author);
     return `<article class="message ${m.kind}"><span class="avatar">${esc(initials(name(m.author)))}</span><div class="message-main"><div class="message-head"><strong>${esc(name(m.author))}</strong>${agent ? `<span class="agent-tag">АГЕНТ · ${esc(name(agent.owner))}</span>` : ""}<time>${time(m.createdAt)}</time></div><div class="message-body">${markdown(m.content)}</div></div></article>`;
   }).join("") || `<div class="empty"><div class="symbol">${space ? "↗" : "✳"}</div><h3>${space ? "Начните с вопроса" : "Команда начинается со спейса"}</h3><p>${space ? "Напишите коллеге или вызовите агента через @. Он увидит историю этого треда и сможет подключить другого агента." : "Создайте пространство, добавьте коллег и подключите своих агентов. Никаких заданных ролей."}</p></div>`;
+  const contextJobs = data.jobs.filter((j) => j.thread === threadId && j.contextStats);
+  if (thread && (thread.memory || contextJobs.length)) {
+    const panel = document.createElement("details"); panel.className = "context-memory";
+    const last = contextJobs.at(-1)?.contextStats;
+    const counts = last ? `<p class="hint">Последний вызов: история ${last.historyChars.toLocaleString()} символов → запрос ${last.promptChars.toLocaleString()} символов. Сжатие: вход ${last.summaryInputChars.toLocaleString()}, выход ${last.summaryOutputChars.toLocaleString()} символов. Это не счётчик токенов или стоимости; чтение файлов агентом учитывается провайдером отдельно.</p>` : "";
+    panel.innerHTML = `<summary>◈ Память треда ${thread.memory ? "· слепок сохранён" : "· исходные сообщения"}</summary><p class="hint">Полная переписка сохранена. Слепок — рабочие заметки агента, не разрешение на действия. Для исправления добавьте сообщение в тред.</p>${thread.memory ? `<div class="message-body">${markdown(thread.memory.summary)}</div><p class="hint">Обновил ${esc(name(thread.memory.agent))}. Источники: ${thread.memory.citations.map(esc).join(", ")}</p>` : ""}${counts}`;
+    $("messages").prepend(panel);
+  }
   const ownWrites = data.jobs.filter((j) => j.thread === threadId && j.mode === "write" && data.agents.find((a) => a.id === j.agent)?.owner === data.me.id && j.started);
   for (const job of ownWrites) {
     const div = document.createElement("div"); div.className = "system";

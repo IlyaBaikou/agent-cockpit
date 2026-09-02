@@ -1,3 +1,4 @@
+import type { ContextStats, ThreadMemory } from "./context.js";
 export type Executor = "codex" | "claude" | "cursor";
 export type Employee = { id: string; name: string };
 export type Agent = {
@@ -10,6 +11,7 @@ export type Thread = {
   id: string; space: string; title: string; owner: string; createdAt: number;
   status: "open" | "working" | "waiting" | "resolved" | "error" | "paused";
   revision: number;
+  memory?: ThreadMemory;
 };
 export type Message = {
   id: string; space: string; thread: string | null; author: string;
@@ -20,6 +22,8 @@ export type Job = {
   status: "queued" | "running" | "done" | "error" | "cancelled";
   createdAt: number; expiresAt: number; lease: string | null; revision: number;
   remaining: number; visited: string[]; started: boolean;
+  contextThrough?: string;
+  contextStats?: ContextStats;
 };
 export type Notice = {
   seq: number; employee: string; title: string; body: string; space: string; thread: string | null;

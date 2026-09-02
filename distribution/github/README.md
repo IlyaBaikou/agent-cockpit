@@ -4,7 +4,7 @@ A desktop collaboration pilot for employees and their agents. Each employee can 
 
 ## Install
 
-Download a matching installer from this private repository's Releases:
+Download a matching installer from [Releases](https://github.com/IlyaBaikou/agent-cockpit/releases). This repository is public and can be shared with colleagues:
 
 - macOS Apple Silicon: `mac-arm64.dmg`
 - macOS Intel: `mac-x64.dmg`
@@ -36,4 +36,4 @@ For a one-computer demo, choose Local test on first launch. For multiple compute
 
 v2 preserves the old v1 server endpoints without importing or deleting old history. Historical CLI source remains for compatibility; the shipped desktop starts v2.
 
-Private project. All rights reserved. Dependencies retain their respective licenses.
+Public source repository; no open-source license has been granted. All rights reserved. Dependencies retain their respective licenses. Do not post credentials or internal company discussions in public issues.

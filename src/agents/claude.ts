@@ -87,7 +87,7 @@ export class ClaudeAdapter implements AgentAdapter {
   async run(request: AgentRequest): Promise<AgentResult> {
     const binary = await resolveClaudeBinary(this.#explicitBinary);
     const writeMode = request.mode === "write";
-    const prompt = writeMode
+    const prompt = request.purpose === "summary" ? request.prompt : writeMode
       ? [
           "You are the assigned implementation agent in an isolated Git worktree.",
           "Implement the requested change by editing files in the current worktree.",

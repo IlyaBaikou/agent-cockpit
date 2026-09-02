@@ -8,7 +8,7 @@ if (!target || target === root || target.startsWith(root + "/")) throw new Error
 try { await stat(target); throw new Error("Export target already exists; refusing to overwrite it"); }
 catch (error) { if (error.code !== "ENOENT") throw error; }
 await mkdir(target, { recursive: true });
-const files = ["src", "test", "scripts", "ui", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.build.json", "Dockerfile", ".dockerignore", ".gitignore", "electron-builder.yml", ".github", "docs/COLLABORATION-MVP.md", "docs/RELEASE-NOTES.md"];
+const files = ["src", "test", "scripts", "ui", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.build.json", "Dockerfile", ".dockerignore", ".gitignore", "electron-builder.yml", ".github", "docs/COLLABORATION-MVP.md", "docs/RELEASE-NOTES.md", "docs/CONTEXT.md"];
 for (const path of files) { await mkdir(dirname(join(target, path)), { recursive: true }); await cp(join(root, path), join(target, path), { recursive: true, errorOnExist: true }); }
 await cp(join(root, "distribution/github"), join(target, "distribution/github"), { recursive: true });
 await cp(join(root, "distribution/github/README.md"), join(target, "README.md"));

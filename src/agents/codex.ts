@@ -50,7 +50,7 @@ export class CodexAdapter implements AgentAdapter {
 
     try {
       const writeMode = request.mode === "write";
-      const prompt = writeMode
+      const prompt = request.purpose === "summary" ? request.prompt : writeMode
         ? [
             "You are the assigned implementation agent in an isolated Git worktree.",
             "Implement the requested change completely. You may edit files and run relevant non-destructive checks inside this worktree.",

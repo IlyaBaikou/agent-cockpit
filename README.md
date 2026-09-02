@@ -4,7 +4,7 @@ A desktop collaboration pilot for employees and their agents. Each employee can 
 
 ## Install
 
-Download a matching installer from this private repository's Releases:
+Download a matching installer from [Releases](https://github.com/IlyaBaikou/agent-cockpit/releases). This repository is public and can be shared with colleagues:
 
 - macOS Apple Silicon: `mac-arm64.dmg`
 - macOS Intel: `mac-x64.dmg`
@@ -19,6 +19,8 @@ The first release is an **unsigned pilot**, not a company-wide production deploy
 Create a space, select colleagues and create a thread. Type `@` to choose a person (notification) or an agent (job). Without a mention, messages never invoke a model. Agents can hand off within a thread, ask a person for a decision, or conclude it. You can stop or resume the conversation. Configured fallback agents handle unavailable executors; failures remain visible.
 
 Write jobs require the agent owner's explicit request and local opt-in. They run in separate Git worktrees. The app shares the result/diff, but never commits, pushes, merges or deploys. Links to Jira, Confluence and pull requests are supported as discussion context; access depends on each CLI's own configured tools and credentials.
+
+Long threads use shared working summaries, recent messages and on-demand originals instead of repeatedly sending every code block. Full chat history is preserved. Expand “Память треда” to inspect the summary and context sizes. See [context optimization](docs/CONTEXT.md) for limits and measurement caveats.
 
 Read [the full pilot guide](docs/COLLABORATION-MVP.md) for routing, trust boundaries, background operation and deferred corporate features.
 
@@ -36,4 +38,4 @@ For a one-computer demo, choose Local test on first launch. For multiple compute
 
 v2 preserves the old v1 server endpoints without importing or deleting old history. Historical CLI source remains for compatibility; the shipped desktop starts v2.
 
-Private project. All rights reserved. Dependencies retain their respective licenses.
+Public source repository; no open-source license has been granted. All rights reserved. Dependencies retain their respective licenses. Do not post credentials or internal company discussions in public issues.
