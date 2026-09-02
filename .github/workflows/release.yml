@@ -37,7 +37,8 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Verify context memory UI with synthetic data
-        run: npx --no-install electron scripts/smoke-context-ui.cjs
+        timeout-minutes: 2
+        run: node node_modules/electron/cli.js scripts/smoke-context-ui.cjs
       - run: npm run desktop:dist -- --${{ matrix.platform }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'

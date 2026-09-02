@@ -4,10 +4,17 @@ const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const profile = mkdtempSync(join(tmpdir(), "agent-hub-ui-test-"));
 app.setPath("userData", profile);
+// Hosted Windows workers have no reliable accelerated desktop. Keep this UI
+// fixture independent of GPU initialization and fail rather than hang forever.
+app.disableHardwareAcceleration();
+const watchdog = setTimeout(() => { console.error("Context UI fixture timed out"); app.exit(1); }, 45_000);
 app.whenReady().then(async () => {
   try {
+    console.log("CONTEXT_UI_APP_READY");
     const window = new BrowserWindow({ width: 1450, height: 1000, show: false, webPreferences: { preload: join(__dirname, "context-ui-preload.cjs"), contextIsolation: true, sandbox: true } });
+    window.webContents.on("render-process-gone", (_event, details) => { console.error("Renderer exited", details.reason); app.exit(1); });
     await window.loadFile(resolve(__dirname, "../ui/hub.html"));
+    console.log("CONTEXT_UI_PAGE_LOADED");
     const result = await window.webContents.executeJavaScript(`
       navigate('demo-space', 'demo-thread');
       const panel = document.querySelector('.context-memory');
@@ -18,7 +25,7 @@ app.whenReady().then(async () => {
     `);
     if (!result.memoryVisible || !result.metricsVisible || result.messages !== 3) throw new Error(JSON.stringify(result));
     if (process.argv[2]) writeFileSync(resolve(process.argv[2]), (await window.webContents.capturePage()).toPNG());
-    console.log("CONTEXT_UI_SMOKE_OK", result); window.destroy(); app.exit(0);
+    console.log("CONTEXT_UI_SMOKE_OK", result); clearTimeout(watchdog); window.destroy(); app.exit(0);
   } catch (error) { console.error(error); app.exit(1); }
 });
 app.on("will-quit", () => rmSync(profile, { recursive: true, force: true }));
