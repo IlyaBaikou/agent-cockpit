@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, safeStorage, shell, Tray } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, safeStorage, shell, Tray } from "electron";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
@@ -11,10 +11,12 @@ import { CollaborationService } from "./collab/service.js";
 import { collaborationHttp } from "./collab/http.js";
 import { field, requireValue, type Agent, type Snapshot } from "./collab/model.js";
 import { pendingNotices } from "./collab/notifications.js";
+import { decodeInvitation, encodeInvitation } from "./collab/invitations.js";
 
 type Settings = {
   version: 2; url: string; token: string; device: string; notifications: boolean;
   cursor: number | null; agents: LocalAgent[]; worktrees: Record<string, string>; local: boolean;
+  theme: "system" | "light" | "dark";
 };
 let settings: Settings;
 let configPath = "";
@@ -45,7 +47,7 @@ app.on("second-instance", () => show());
 function show(): void { window?.show(); window?.focus(); }
 function state(): unknown {
   return { connected: Boolean(snapshot) && !connectionError, error: connectionError, snapshot,
-    settings: { url: settings.url, device: settings.device, notifications: settings.notifications, local: settings.local, agents: settings.agents },
+    settings: { url: settings.url, device: settings.device, notifications: settings.notifications, local: settings.local, agents: settings.agents, theme: settings.theme },
     health: Object.fromEntries(health), notificationsSupported: Notification.isSupported(), version: app.getVersion() };
 }
 function changed(): void { window?.webContents.send("hub:changed", state()); }
@@ -61,7 +63,7 @@ function save(): Promise<void> {
 async function load(): Promise<void> {
   await mkdir(app.getPath("userData"), { recursive: true });
   configPath = join(app.getPath("userData"), "connection-v2.json");
-  settings = { version: 2, url: "", token: "", device: randomUUID(), notifications: true, cursor: null, agents: [], worktrees: {}, local: false };
+  settings = { version: 2, url: "", token: "", device: randomUUID(), notifications: true, cursor: null, agents: [], worktrees: {}, local: false, theme: "system" };
   try {
     const stored = JSON.parse(await readFile(configPath, "utf8")) as Settings;
     requireValue(stored.version === 2 && Array.isArray(stored.agents), "Настройки повреждены");
@@ -69,6 +71,8 @@ async function load(): Promise<void> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Не удалось прочитать защищённые настройки. Оригинал сохранён; восстановите доступ к хранилищу ключей ОС.");
   }
+  if (!["system", "light", "dark"].includes(settings.theme)) settings.theme = "system";
+  nativeTheme.themeSource = settings.theme;
   // Explicit migration only; the installer never searches for or copies credentials.
   const index = process.argv.indexOf("--import-legacy");
   if (!settings.url && index >= 0 && process.argv[index + 1]) {
@@ -128,16 +132,16 @@ function handlers(): void {
     });
   };
   register("hub:state", () => state());
-  register("hub:connect", async (input: { url: string; credential: string; type: string }) => {
+  register("hub:connect", async (input: { url: string; credential: string; type: string; name?: string }) => {
     requireValue(safeStorage.isEncryptionAvailable(), "Сначала разблокируйте хранилище ключей ОС; приглашение пока не использовано.");
     requireValue(!settings.agents.length, "Для смены хаба используйте отдельный профиль приложения; локальные агенты уже привязаны к текущему хабу.");
     let url = input.url, credential = input.credential;
     if (credential.startsWith("AH2:")) {
-      const invite = JSON.parse(Buffer.from(credential.slice(4), "base64url").toString("utf8")) as { url: string; code: string };
+      const invite = decodeInvitation(credential);
       url = invite.url; credential = invite.code; input.type = "invite";
     }
     const candidate = new CollaborationClient(url, input.type === "invite" ? "" : credential);
-    const token = input.type === "invite" ? (await candidate.enroll(credential)).token : credential;
+    const token = input.type === "invite" ? (await candidate.enroll(credential, input.name)).token : credential;
     const connected = new CollaborationClient(url, token);
     const result = await connected.call<Snapshot>("sync");
     await stopRunners();
@@ -151,7 +155,7 @@ function handlers(): void {
     await startLocal(); await save(); client = new CollaborationClient(settings.url, settings.token); await sync(); return state();
   });
   register("hub:call", async (op: string, input: Record<string, unknown>) => {
-    requireValue(client && ["post", "space", "members", "thread-state", "profile"].includes(op), "Недоступная операция");
+    requireValue(client && ["post", "space", "members", "thread-state", "profile", "revoke-invite"].includes(op), "Недоступная операция");
     const result = await client.call(op, { ...input, requestId: typeof input.requestId === "string" ? input.requestId : randomUUID() });
     await sync(); return result;
   });
@@ -169,16 +173,29 @@ function handlers(): void {
   register("hub:check", async (input: LocalAgent) => ({ detail: await checkLocalAgent(input) }));
   register("hub:directory", async () => (await dialog.showOpenDialog(window!, { properties: ["openDirectory"] })).filePaths[0] ?? "");
   register("hub:binary", async () => (await dialog.showOpenDialog(window!, { properties: ["openFile"] })).filePaths[0] ?? "");
-  register("hub:preferences", async (input: { notifications: boolean }) => { settings.notifications = input.notifications === true; await save(); changed(); });
+  register("hub:preferences", async (input: { notifications?: boolean; theme?: Settings["theme"] }) => {
+    if (input.theme !== undefined) requireValue(["system", "light", "dark"].includes(input.theme), "Неизвестная тема");
+    if (input.notifications !== undefined) settings.notifications = input.notifications === true;
+    if (input.theme !== undefined) { settings.theme = input.theme; nativeTheme.themeSource = input.theme; }
+    await save(); changed();
+  });
   register("hub:notification-test", () => {
     requireValue(Notification.isSupported(), "Системные уведомления недоступны");
     new Notification({ title: "Agent Hub", body: "Уведомления работают. Здесь будут упоминания, ответы и запросы решения." }).show();
   });
-  register("hub:invite", async (name: string) => {
+  register("hub:invite", async (input: { kind: "personal" | "group"; name?: string; space?: string; days?: number; maxUses?: number }) => {
     requireValue(client && !settings.local, "Приглашения коллег доступны в удалённом хабе");
-    const result = await client.call<{ code: string }>("invite", { name, requestId: randomUUID() });
-    const invite = `AH2:${Buffer.from(JSON.stringify({ url: settings.url, code: result.code })).toString("base64url")}`;
-    clipboard.writeText(invite); await sync(); return { copied: true };
+    requireValue(input.kind === "personal" || input.kind === "group", "Выберите тип приглашения");
+    const group = input.kind === "group";
+    const result = await client.call<{ code: string; id?: string }>(group ? "group-invite" : "invite", { ...input, requestId: randomUUID() });
+    clipboard.writeText(encodeInvitation(settings.url, result.code, group)); await sync(); return { copied: true, id: result.id };
+  });
+  register("hub:join-invite", async (value: string) => {
+    requireValue(client && snapshot, "Сначала подключитесь к хабу");
+    const invite = decodeInvitation(value);
+    requireValue(invite.url === client.url, "Это приглашение в другой хаб. Текущий аккаунт не изменён");
+    const result = await client.call("join-invite", { code: invite.code });
+    await sync(); return result;
   });
   register("hub:link", async (url: string) => {
     const parsed = new URL(url); requireValue(["https:", "http:"].includes(parsed.protocol) && !parsed.username && !parsed.password, "Небезопасная ссылка");
@@ -191,7 +208,7 @@ function handlers(): void {
 }
 
 async function createWindow(): Promise<void> {
-  window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1080, minHeight: 700, title: "Agent Hub", backgroundColor: "#f6f7fb", webPreferences: { preload: join(app.getAppPath(), "dist/src/desktop-preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1080, minHeight: 700, title: "Agent Hub", backgroundColor: nativeTheme.shouldUseDarkColors ? "#171a27" : "#f6f7fb", webPreferences: { preload: join(app.getAppPath(), "dist/src/desktop-preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));

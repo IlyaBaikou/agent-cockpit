@@ -28,16 +28,23 @@ export type Job = {
 export type Notice = {
   seq: number; employee: string; title: string; body: string; space: string; thread: string | null;
 };
+export type GroupInvitation = {
+  id: string; owner: string; space: string; hash: string; createdAt: number;
+  expiresAt: number; maxUses: number; usedBy: string[]; revoked: boolean;
+};
+export type GroupInvitationInfo = Omit<GroupInvitation, "hash" | "usedBy"> & { uses: number };
 export type State = {
   version: 2; revision: number; employees: Employee[]; agents: Agent[]; spaces: Space[];
   threads: Thread[]; messages: Message[]; jobs: Job[]; notices: Notice[]; sequence: number;
   credentials: { employee: string; hash: string }[];
   invitations: { employee: string; hash: string; expiresAt: number }[];
+  groupInvitations?: GroupInvitation[];
   requests: { actor: string; key: string; result: unknown }[];
 };
 export type Snapshot = {
   me: Employee; revision: number; employees: Employee[]; agents: Agent[]; spaces: Space[];
   threads: Thread[]; messages: Message[]; jobs: Omit<Job, "lease">[]; notices: Notice[]; sequence: number;
+  groupInvitations?: GroupInvitationInfo[];
 };
 export function emptyState(): State {
   return { version: 2, revision: 0, employees: [], agents: [], spaces: [], threads: [], messages: [], jobs: [], notices: [], sequence: 0, credentials: [], invitations: [], requests: [] };

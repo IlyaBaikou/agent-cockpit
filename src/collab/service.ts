@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { secureTokenMatch, type ControlCredential } from "../control-auth.js";
-import { CollabError, field, mentions, requireValue, type Agent, type Job, type Message, type Snapshot, type Space, type State, type Thread } from "./model.js";
+import { CollabError, field, mentions, requireValue, type Agent, type GroupInvitation, type Job, type Message, type Snapshot, type Space, type State, type Thread } from "./model.js";
 import type { StateStore } from "./store.js";
 import { acceptMemory, validMemory, type ContextPacket, type ContextStats } from "./context.js";
 
@@ -15,8 +15,17 @@ const bool = (value: unknown): boolean => value === true;
 export class CollaborationService {
   constructor(readonly store: StateStore, private credentials: ControlCredential[] = [], private now = Date.now) {}
 
-  async enroll(code: string): Promise<{ token: string; employee: string }> {
+  async enroll(code: string, name?: unknown): Promise<{ token: string; employee: string }> {
     return this.store.transact((s) => {
+      const group = s.groupInvitations?.find((i) => secureTokenMatch(i.hash, hash(code)));
+      if (group) {
+        const employee = { id: uid(), name: field(name, "Введите ваше имя", 80) };
+        this.joinGroup(s, group, employee.id, employee.name);
+        s.employees.push(employee);
+        const token = secret();
+        s.credentials.push({ employee: employee.id, hash: hash(token) });
+        return { token, employee: employee.id };
+      }
       const invite = s.invitations.find((i) => secureTokenMatch(i.hash, hash(code)) && i.expiresAt > this.now());
       requireValue(invite, "Приглашение истекло или уже использовано", 401);
       const token = secret();
@@ -50,7 +59,7 @@ export class CollaborationService {
         if (previous) return previous.result;
       }
       const result = this.dispatch(s, actor, op, input);
-      if (key && !["sync", "claim", "heartbeat", "lease", "invite"].includes(op)) {
+      if (key && !["sync", "claim", "heartbeat", "lease", "invite", "group-invite"].includes(op)) {
         s.requests.push({ actor, key: `${op}:${key}`, result });
         s.requests = s.requests.slice(-2000);
       }
@@ -83,6 +92,31 @@ export class CollaborationService {
         const code = secret();
         s.invitations.push({ employee, hash: hash(code), expiresAt: this.now() + 48 * 3600_000 });
         return { code, employee, expiresInHours: 48 };
+      }
+      case "group-invite": {
+        const space = this.space(s, actor, b.space);
+        requireValue(space.owner === actor, "Общие приглашения создаёт владелец спейса", 403);
+        const days = b.days ?? 7, maxUses = b.maxUses ?? 100;
+        requireValue(typeof days === "number" && Number.isInteger(days) && days >= 1 && days <= 30, "Срок: от 1 до 30 дней");
+        requireValue(typeof maxUses === "number" && Number.isInteger(maxUses) && maxUses >= 1 && maxUses <= 1000, "Лимит: от 1 до 1000 входов");
+        const invites = s.groupInvitations ??= [];
+        requireValue(invites.filter((i) => i.owner === actor && !i.revoked && i.expiresAt > this.now() && i.usedBy.length < i.maxUses).length < 100, "Сначала отключите неиспользуемые приглашения");
+        const code = secret();
+        const invite: GroupInvitation = { id: uid(), owner: actor, space: space.id, hash: hash(code), createdAt: this.now(), expiresAt: this.now() + days * 24 * 3600_000, maxUses, usedBy: [], revoked: false };
+        invites.push(invite);
+        return { code, id: invite.id, space: space.id, expiresAt: invite.expiresAt, maxUses };
+      }
+      case "revoke-invite": {
+        const invite = s.groupInvitations?.find((i) => i.id === b.id && i.owner === actor);
+        requireValue(invite, "Приглашение недоступно", 403);
+        invite.revoked = true;
+        return { ok: true };
+      }
+      case "join-invite": {
+        const code = field(b.code, "Приглашение");
+        const invite = s.groupInvitations?.find((i) => secureTokenMatch(i.hash, hash(code)));
+        requireValue(invite, "Общее приглашение не найдено", 401);
+        return this.joinGroup(s, invite, actor, this.name(s, actor));
       }
       case "space": {
         const name = field(b.name, "Название", 80);
@@ -309,6 +343,19 @@ export class CollaborationService {
     requireValue(thread, "Тред не найден", 404); this.space(s, actor, thread.space); return thread;
   }
   private name(s: State, id: string): string { return s.agents.find((a) => a.id === id)?.name ?? s.employees.find((e) => e.id === id)?.name ?? id; }
+  private joinGroup(s: State, invite: GroupInvitation, employee: string, name: string): { space: string } {
+    requireValue(!invite.revoked && invite.expiresAt > this.now(), "Приглашение истекло или отключено", 401);
+    const space = s.spaces.find((sp) => sp.id === invite.space && sp.owner === invite.owner && sp.members.includes(invite.owner));
+    requireValue(space, "Спейс приглашения недоступен", 403);
+    if (space.members.includes(employee)) return { space: space.id };
+    requireValue(!invite.usedBy.includes(employee), "Ваш доступ к спейсу был отозван. Обратитесь к владельцу", 403);
+    requireValue(invite.usedBy.length < invite.maxUses, "Лимит входов по приглашению исчерпан", 401);
+    invite.usedBy.push(employee); space.members.push(employee);
+    this.message(s, space.id, null, "hub", "system", `${name} присоединился к спейсу по общему приглашению.`);
+    this.notice(s, space.owner, "Новый участник спейса", `${name} · ${space.name}`, space.id, null);
+    this.notice(s, employee, "Вы добавлены в спейс", space.name, space.id, null);
+    return { space: space.id };
+  }
   private message(s: State, space: string, thread: string | null, author: string, kind: Message["kind"], content: string): Message {
     const message = { id: uid(), space, thread, author, kind, content, createdAt: this.now() };
     s.messages.push(message); return message;
@@ -336,6 +383,8 @@ export class CollaborationService {
       spaces, threads, messages: s.messages.filter((m) => ids.has(m.space)),
       jobs: s.jobs.filter((j) => tids.has(j.thread)).map(({ lease: _lease, ...job }) => job),
       notices: s.notices.filter((n) => n.employee === actor && ids.has(n.space)), sequence: s.sequence,
+      groupInvitations: (s.groupInvitations ?? []).filter((i) => i.owner === actor && ids.has(i.space))
+        .map(({ hash: _hash, usedBy, ...i }) => ({ ...i, uses: usedBy.length })),
     };
   }
   private context(s: State, job: Job): ContextPacket {

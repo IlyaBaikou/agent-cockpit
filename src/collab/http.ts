@@ -22,7 +22,7 @@ export async function collaborationHttp(service: CollaborationService, request: 
     requireValue(body && typeof body === "object" && !Array.isArray(body), "Invalid body");
     if (request.url === "/v2/enroll") {
       requireValue(typeof body.code === "string" && body.code.length <= 200, "Invalid invite");
-      send(200, await service.enroll(body.code));
+      send(200, await service.enroll(body.code, body.name));
     } else {
       requireValue(request.url === "/v2/rpc" && typeof body.op === "string", "Not found", 404);
       requireValue(!body.input || (typeof body.input === "object" && !Array.isArray(body.input)), "Invalid input");

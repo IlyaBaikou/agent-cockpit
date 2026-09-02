@@ -11,7 +11,7 @@ export class CollaborationClient {
   async call<T = unknown>(op: string, input: Record<string, unknown> = {}): Promise<T> {
     return this.request("/v2/rpc", { op, input });
   }
-  async enroll(code: string): Promise<{ token: string; employee: string }> { return this.request("/v2/enroll", { code }); }
+  async enroll(code: string, name?: string): Promise<{ token: string; employee: string }> { return this.request("/v2/enroll", { code, name }); }
   private async request<T>(path: string, body: unknown): Promise<T> {
     const result = await fetch(`${this.url}${path}`, {
       method: "POST", redirect: "error", headers: { "content-type": "application/json", authorization: `Bearer ${this.token}` },

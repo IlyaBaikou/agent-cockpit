@@ -1,11 +1,20 @@
-Employee-owned agents, spaces and threads — pilot 0.2.3.
+Employee-owned agents, spaces and threads — pilot 0.2.4.
+
+New in 0.2.4:
+
+- Light, dark and system-following themes in Settings → Appearance and on the sign-in screen. Preferences survive restarts; changing theme does not change notification preferences. Cards, code, dialogs and enrollment are themed.
+- Space owners can create one reusable AH2 invitation for a team chat. Each newcomer supplies a display name, receives an independent personal credential and automatically joins the selected space only.
+- Default invitation limits: 7 days and 100 entries; configurable up to 30 days and 1,000 entries. Owners see usage counts and can disable new entries. Disabling a code does not remove existing members.
+- Existing employees can join another space in the same hub with the shared code without replacing their account or local agents. Individual 48-hour invitations still work.
+- Update the coordinator **and** desktop applications. Existing PostgreSQL/SQLite state is extended in place without deleting history or credentials. Older clients retain personal invitations; shared invitation enrollment requires 0.2.4.
+- Shared codes grant access to the chosen space's full history and its available agents. Share only in a trusted, closed team chat, never publicly. This is bearer-code enrollment, not SSO or verified corporate identity.
 
 New in 0.2.3:
 
 - General chat shows a clickable thread card with its creator, initial request, live status and reply count. Existing threads are included automatically; replies stay inside their thread.
 - Thread cards open the conversation and preserve unsent drafts when switching back.
 - Waiting/paused threads explain how to continue: post a clarification or decision and @mention the next agent. Humans can continue the cross-agent conversation in the same thread.
-- No coordinator or database migration is needed for this update. Install the updated desktop app.
+- The 0.2.3 card-only change required no coordinator or database migration.
 
 0.2.2 hardens the Windows CI interface check with best-effort temporary-profile cleanup, software rendering, a direct local Electron launcher and a bounded timeout. Application context behavior is unchanged from 0.2.1.
 

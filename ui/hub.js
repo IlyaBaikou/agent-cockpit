@@ -4,6 +4,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const labels = { open: "Открыт", working: "Агенты работают", waiting: "Нужен человек", resolved: "Решено", error: "Ошибка", paused: "На паузе" };
 let appState, data, spaceId = null, threadId = null, renderKey = "", mentionStart = null;
 let draftRequest = null;
+let invitationView = null;
 const drafts = new Map();
 const name = (id) => data?.agents.find((a) => a.id === id)?.name ?? data?.employees.find((e) => e.id === id)?.name ?? "Agent Hub";
 const initials = (s) => s.split(/[\s/-]+/).slice(0, 2).map((p) => p[0] ?? "").join("").toUpperCase();
@@ -36,8 +37,15 @@ document.addEventListener("click", (event) => {
   const link = event.target.closest("a[href]");
   if (link) { event.preventDefault(); void window.hub.openLink(link.getAttribute("href")).catch((e) => toast(errorText(e))); }
 });
+document.addEventListener("change", (event) => {
+  if (!event.target.matches("[data-theme-choice]")) return;
+  const before = appState?.settings.theme ?? "system", selected = event.target.value;
+  applyTheme(selected);
+  void window.hub.preferences({ theme: selected }).catch((error) => { applyTheme(before); toast(errorText(error)); });
+});
 function receive(value) {
   appState = value; data = value.snapshot;
+  applyTheme(value.settings.theme ?? "system");
   $("onboarding").classList.toggle("hidden", Boolean(data)); $("workspace").classList.toggle("hidden", !data);
   if (!data) { if (value.error) $("connect-error").textContent = value.error; return; }
   if (!data.spaces.some((s) => s.id === spaceId)) { spaceId = data.spaces[0]?.id ?? null; threadId = null; renderKey = ""; }
@@ -46,6 +54,16 @@ function receive(value) {
   $("connection-dot").classList.toggle("ready", value.connected); $("connection-text").textContent = value.connected ? (value.settings.local ? "Локальный хаб" : "Хаб подключён") : "Связь прервана";
   $("connection-banner").classList.toggle("hidden", !value.error); $("connection-banner").textContent = value.error ? `${value.error}. Восстанавливаем подключение…` : "";
   renderSidebar(); renderTopics(); renderChat();
+  if ($("modal").open && $("group-invite-form")) {
+    const key = JSON.stringify(data.groupInvitations);
+    if (invitationView !== key) {
+      const space = $("invite-space").value, days = $("invite-days").value, limit = $("invite-limit").value;
+      const personalName = $("invite-name").value, code = $("space-invitation").value;
+      openInvitations(space);
+      $("invite-days").value = days; $("invite-limit").value = limit;
+      $("invite-name").value = personalName; $("space-invitation").value = code;
+    }
+  }
 }
 function renderSidebar() {
   $("spaces").innerHTML = data.spaces.map((s) => `<button class="space-button ${s.id === spaceId ? "active" : ""}" data-space="${s.id}"><span>#</span>${esc(s.name)}</button>`).join("");
@@ -194,6 +212,11 @@ function editSpace(existing) {
     const members = [...document.querySelectorAll('input[name="member"]:checked')].map((i) => i.value);
     const result = await window.hub.call(existing ? "members" : "space", { members, name: $("new-space-name").value, ...(existing ? { space: space.id } : {}) }); closeModal(); navigate(result.id, null);
   }); };
+  if (space && !appState.settings.local && data.groupInvitations) {
+    const invite = document.createElement("button"); invite.type = "button"; invite.className = "quiet";
+    invite.textContent = "Пригласить команду в этот спейс"; invite.onclick = () => openInvitations(space.id);
+    $("modal-content").append(invite);
+  }
 }
 $("add-agent").onclick = () => editAgent();
 function editAgent(id) {
@@ -207,18 +230,44 @@ function editAgent(id) {
   $("agent-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { await window.hub.saveAgent(input()); closeModal(); toast("Агент сохранён. Проверяем готовность раннера."); }); };
 }
 $("settings").onclick = () => {
-  openModal("Настройки", `<div class="settings-section"><form id="profile-form"><label>Ваше имя<div class="row"><input id="profile-name" value="${esc(data.me.name)}" required maxlength="80"><button>Сохранить</button></div></label></form><p class="hint">Хаб: ${esc(appState.settings.url)}<br>Agent Hub ${esc(appState.version)} · ${esc(data.me.id)}</p><div class="divider"></div><h3>Системные уведомления</h3><label class="check"><input id="notifications-toggle" type="checkbox" ${appState.settings.notifications ? "checked" : ""}> Упоминания, ответы, ошибки и запросы решения</label><p class="hint">Содержание кода и переписки не показывается на экране блокировки. Закрытие окна сворачивает приложение в трей — агенты продолжают работать. «Выйти» останавливает их. Автозапуска пока нет.</p><button id="notification-test" class="quiet">Отправить тестовое уведомление</button><div class="divider"></div><h3>Пригласить коллегу</h3><form id="invite-form"><label>Имя сотрудника<div class="row"><input id="invite-name" required placeholder="Например: Pavel"><button ${appState.settings.local ? "disabled" : ""}>Создать приглашение</button></div></label></form><p class="hint">Одноразовое приглашение действует 48 часов. Скопируется в буфер обмена — отправьте коллеге лично, не в общий чат. После входа добавьте коллегу в нужные спейсы.</p></div>`);
+  openModal("Настройки", `<div class="settings-section"><form id="profile-form"><label>Ваше имя<div class="row"><input id="profile-name" value="${esc(data.me.name)}" required maxlength="80"><button>Сохранить</button></div></label></form><p class="hint">Хаб: ${esc(appState.settings.url)}<br>Agent Hub ${esc(appState.version)} · ${esc(data.me.id)}</p><div class="divider"></div><h3>Оформление</h3><label>Тема приложения<select data-theme-choice aria-label="Тема приложения"><option value="system">Как в системе</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select></label><p class="hint">Сохраняется на этом компьютере. «Как в системе» автоматически следует оформлению ОС.</p><div class="divider"></div><h3>Системные уведомления</h3><label class="check"><input id="notifications-toggle" type="checkbox" ${appState.settings.notifications ? "checked" : ""}> Упоминания, ответы, ошибки и запросы решения</label><p class="hint">Содержание кода и переписки не показывается на экране блокировки. Закрытие окна сворачивает приложение в трей — агенты продолжают работать. «Выйти» останавливает их. Автозапуска пока нет.</p><button id="notification-test" class="quiet">Отправить тестовое уведомление</button><div class="divider"></div><h3>Приглашения</h3><p class="hint">Пригласите сразу команду в свой спейс или одного коллегу лично. Уже есть приглашение в другой спейс? Вступите под текущим аккаунтом.</p><button id="open-invitations" ${appState.settings.local ? "disabled" : ""}>Пригласить команду / вступить в спейс</button>${appState.settings.local ? '<p class="hint">Для приглашений с других компьютеров нужен удалённый HTTPS-хаб.</p>' : ''}</div>`);
+  applyTheme();
   $("profile-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { await window.hub.call("profile", { name: $("profile-name").value }); toast("Имя сохранено"); }); };
   $("notifications-toggle").onchange = () => void safely(() => window.hub.preferences({ notifications: $("notifications-toggle").checked }));
   $("notification-test").onclick = () => void safely(async () => { await window.hub.testNotification(); toast("Тест отправлен. Если баннера нет, проверьте разрешения Agent Hub в настройках уведомлений ОС."); });
-  $("invite-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { await window.hub.invite($("invite-name").value); toast("Одноразовое приглашение скопировано. Отправьте его коллеге лично."); $("invite-name").value = ""; }); };
+  $("open-invitations").onclick = () => openInvitations();
 };
+function openInvitations(selectedSpace = spaceId) {
+  invitationView = JSON.stringify(data.groupInvitations);
+  const owned = data.spaces.filter((s) => s.owner === data.me.id);
+  const supported = Array.isArray(data.groupInvitations);
+  const canCreate = supported && owned.length && !appState.settings.local;
+  const now = Date.now();
+  const invites = (data.groupInvitations ?? []).slice().reverse();
+  openModal("Приглашения команды", `<div class="settings-section"><h3>Одно приглашение — вся команда</h3><p class="hint">Скопируйте код в закрытый командный чат. Каждый коллега установит Agent Hub, вставит код, укажет своё имя и сразу попадёт в выбранный спейс.</p>${!supported ? '<p class="banner">Сначала обновите сервер хаба до 0.2.4 для общих приглашений.</p>' : !owned.length ? '<p class="hint">Создайте свой спейс или попросите его владельца выдать общее приглашение.</p>' : ''}<form id="group-invite-form"><label>В какой спейс приглашаем<select id="invite-space" required>${owned.map((s) => `<option value="${esc(s.id)}" ${s.id === selectedSpace ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label><div class="invite-options"><label>Срок действия<select id="invite-days"><option value="1">1 день</option><option value="7" selected>7 дней</option><option value="30">30 дней</option></select></label><label>Максимум входов<input id="invite-limit" type="number" min="1" max="1000" value="100" required></label></div><p class="invite-warning">Любой получивший код сможет вступить и прочитать всю историю этого спейса, а также обращаться к его агентам. Другие спейсы не открываются. Не публикуйте код в интернете.</p><button class="primary" ${canCreate ? '' : 'disabled'}>Создать и скопировать общее приглашение</button></form><div class="divider"></div><h3>Мои общие приглашения</h3><div class="invite-list">${invites.map((i) => {
+    const active = !i.revoked && i.expiresAt > now && i.uses < i.maxUses;
+    const state = i.revoked ? 'Отключено' : i.expiresAt <= now ? 'Истекло' : i.uses >= i.maxUses ? 'Лимит исчерпан' : 'Действует';
+    return `<div class="invite-item"><div><strong>${esc(data.spaces.find((s) => s.id === i.space)?.name ?? 'Спейс')}</strong><small>${state} · ${i.uses} / ${i.maxUses} входов<br>До ${esc(new Date(i.expiresAt).toLocaleString('ru'))}</small></div><button class="quiet danger" data-revoke-invite="${esc(i.id)}" ${active ? '' : 'disabled'}>Отключить</button></div>`;
+  }).join('') || '<p class="hint">Пока нет общих приглашений.</p>'}</div><p class="hint">Отключение запрещает новые входы. Уже вошедшие останутся участниками — удалить их можно в настройках спейса. Сам код хранится только у того, кто его скопировал.</p><details><summary>Личное одноразовое приглашение</summary><form id="invite-form"><label>Имя коллеги<div class="row"><input id="invite-name" required maxlength="80" placeholder="Например: Pavel"><button ${appState.settings.local ? 'disabled' : ''}>Скопировать</button></div></label></form><p class="hint">Действует 48 часов, отправляется лично. Коллегу нужно будет отдельно добавить в спейс.</p></details><div class="divider"></div><h3>Вступить по общему приглашению</h3><form id="join-space-form"><label>Код из командного чата<textarea id="space-invitation" rows="2" required placeholder="AH2:…"></textarea></label><p class="hint">Вы сохраните текущий аккаунт и своих агентов. Приглашение должно быть в этот же хаб.</p><button ${supported ? '' : 'disabled'}>Вступить в спейс</button></form></div>`);
+  $("group-invite-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => {
+    const space = $("invite-space").value;
+    await window.hub.invite({ kind: "group", space, days: Number($("invite-days").value), maxUses: Number($("invite-limit").value) });
+    openInvitations(space); toast("Общее приглашение скопировано. Отправьте код в закрытый чат команды.");
+  }); };
+  $("modal-content").querySelectorAll("[data-revoke-invite]").forEach((b) => b.onclick = () => void safely(async () => {
+    await window.hub.call("revoke-invite", { id: b.dataset.revokeInvite }); openInvitations(selectedSpace); toast("Новые входы по этому приглашению отключены. Участники остались в спейсе.");
+  }));
+  $("invite-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { await window.hub.invite({ kind: "personal", name: $("invite-name").value }); $("invite-name").value = ""; toast("Одноразовое приглашение скопировано. Отправьте его коллеге лично."); }); };
+  $("join-space-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => {
+    const result = await window.hub.joinInvite($("space-invitation").value.trim()); closeModal(); navigate(result.space, null); toast("Вы в спейсе. Можно общаться и подключать агентов.");
+  }); };
+}
 $("inbox").onclick = () => {
   openModal("Уведомления", data.notices.slice().reverse().slice(0, 100).map((n, i) => `<button class="inbox-item" data-index="${i}"><strong>${esc(n.title)}</strong><small>${esc(friendly(n.body))}</small></button>`).join("") || '<p class="hint">Пока нет уведомлений. Здесь появятся упоминания и ответы на ваши запросы.</p>');
   const notices = data.notices.slice().reverse().slice(0, 100);
   $("modal-content").querySelectorAll("[data-index]").forEach((b) => b.onclick = () => { const n = notices[Number(b.dataset.index)]; closeModal(); navigate(n.space, n.thread); });
 };
-$("connect-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { const result = await window.hub.connect({ url: $("hub-url").value.trim(), credential: $("credential").value.trim(), type: $("raw-token").checked ? "token" : "invite" }); $("credential").value = ""; receive(result); }, "connect-error"); };
+$("connect-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { const result = await window.hub.connect({ url: $("hub-url").value.trim(), credential: $("credential").value.trim(), name: $("join-name").value.trim(), type: $("raw-token").checked ? "token" : "invite" }); $("credential").value = ""; receive(result); }, "connect-error"); };
 $("local-test").onclick = () => void safely(async () => receive(await window.hub.local()), "connect-error");
 window.hub.onChanged(receive);
 window.hub.onNavigate(({ space, thread }) => navigate(space, thread));

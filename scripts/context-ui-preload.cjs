@@ -3,6 +3,7 @@ const { contextBridge } = require("electron");
 const now = Date.now();
 const me = { id: "owner", name: "Alex" };
 const snapshot = {
+  groupInvitations: [{ id: "demo-invite", owner: "owner", space: "demo-space", createdAt: now, expiresAt: now + 7 * 86400_000, maxUses: 100, uses: 3, revoked: false }],
   me, revision: 1, sequence: 0, notices: [], employees: [me, { id: "peer", name: "Sam" }],
   agents: [{ id: "a", owner: "owner", name: "Backend Codex", executor: "codex", enabled: true, ready: true },
     { id: "b", owner: "peer", name: "Frontend Claude", executor: "claude", enabled: true, ready: true }],
@@ -15,6 +16,16 @@ const snapshot = {
     { id: "m3", space: "demo-space", thread: "demo-thread", kind: "agent", author: "b", content: "Да, старые клиенты продолжат работать. Нужно решение человека по названию поля.", createdAt: now }],
   jobs: [{ id: "j", thread: "demo-thread", agent: "a", status: "done", mode: "read", contextStats: { historyChars: 52000, promptChars: 17000, summaryInputChars: 33000, summaryOutputChars: 1300, compacted: true, memoryReused: false } }],
 };
+const settings = { agents: [], local: false, url: "https://hub.example", theme: "system", notifications: true };
+const state = () => ({ snapshot, connected: true, version: "0.2.4", settings });
+let changed = () => {};
+const calls = [];
 contextBridge.exposeInMainWorld("hub", {
-  onChanged: () => {}, onNavigate: () => {}, state: async () => ({ snapshot, connected: true, version: "0.2.1", settings: { agents: [], local: true, url: "http://localhost" } }),
+  onChanged: (callback) => { changed = callback; }, onNavigate: () => {}, state: async () => state(),
+  preferences: async (input) => { calls.push({ op: "preferences", input }); Object.assign(settings, input); changed(state()); },
+  invite: async (input) => { calls.push({ op: "invite", input }); return { copied: true }; },
+  joinInvite: async (input) => { calls.push({ op: "joinInvite", input }); return { space: "demo-space" }; },
+  call: async (op, input) => { calls.push({ op, input }); if (op === "revoke-invite") { snapshot.groupInvitations[0].revoked = true; changed(state()); } return {}; },
+  connect: async (input) => { calls.push({ op: "connect", input }); return state(); },
+  testCalls: () => calls,
 });

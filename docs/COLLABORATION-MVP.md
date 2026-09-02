@@ -4,8 +4,8 @@ This is the simplified collaboration model. Professional roles, provider-based i
 
 ## First run
 
-1. Install Agent Hub from the private GitHub Release. A source checkout, Node and npm are not required for the installed desktop application.
-2. Paste a single-use AH2 invitation (48-hour lifetime). It contains the coordinator URL and an enrollment code; the application exchanges it for a personal credential. Share invitations privately, never in a public space.
+1. Install Agent Hub from the public GitHub Release. A source checkout, Node and npm are not required for the installed desktop application.
+2. Paste an AH2 invitation. A personal code is single-use and lasts 48 hours. A shared team code asks for your name and opens its chosen space automatically; default lifetime is 7 days with 100 entries. Each newcomer gets a distinct personal credential. Send personal codes privately and shared codes only to a closed, trusted team chat, never publicly.
 3. An existing coordinator controller can instead enter the hub URL and their personal control token under manual setup. Never give your token to a colleague.
 4. Set your display name. Under My agents → + choose Codex, Claude Code or Cursor CLI, a name, context and local directory. Multiple agents can use the same provider. Use a different name for each.
 5. Click Check connection. The selected CLI must already be installed and logged in on this computer. An explicit executable path is available when desktop PATH discovery does not find it.
@@ -13,6 +13,16 @@ This is the simplified collaboration model. Professional roles, provider-based i
 7. Compose a message; type @ and select a human or specific agent. A human mention sends a notification, not a model job. A space-level agent mention creates a thread automatically. One directly invoked agent per message in this pilot.
 
 Local test starts an embedded SQLite coordinator bound only to loopback. It is for one-computer evaluation, not invitations between computers. Use the HTTPS cloud coordinator for a two-person pilot without a VPN.
+
+## Appearance and shared invitations (0.2.4)
+
+Settings → Appearance supports light, dark and OS-following themes. The choice is saved in the desktop profile, independent of notification preferences. A non-sensitive local cache applies the theme before first paint. The sign-in screen also has a theme selector.
+
+Space owners can create reusable invitations from Settings → Invitations or their space's member settings. Choose the space, lifetime (1, 7 or 30 days) and maximum entries (1–1,000). A shared invitation grants membership with access to all existing/future chat and threads in that space and the ability to address its agents, but does not grant access to other spaces, another employee's credentials or write permission for their agents. Use a dedicated new space if its prior history should not be shared.
+
+An existing employee can paste a shared code under “Join with a shared invitation”; this preserves their identity and local agents and rejects a different coordinator URL. Repeated joins by an existing member do not consume entries. A member removed after using a code cannot regain access by reusing that same code under that account. Owners see counts and can disable invitations; revocation/expiry stops new entries, not existing memberships. Use member management for removal.
+
+The server stores invitation hashes, not plaintext codes. Usage limits, enrollment and membership changes share the same atomic state transaction. Shared invitation metadata is visible only to its creator. Names are self-declared: this pilot does not verify corporate identity or provide SSO. Do not use a publicly posted invitation as an access-control policy. Upgrade coordinator and desktop apps to 0.2.4; the additive optional state field needs no destructive database migration. Legacy individual codes continue to work.
 
 ## Conversation and intervention
 

@@ -10,11 +10,15 @@ Download a matching installer from [Releases](https://github.com/IlyaBaikou/agen
 - macOS Intel: `mac-x64.dmg`
 - Windows 10/11 x64: `win-x64.exe`
 
-The app does not need a source checkout, Node or npm. Install and log in to your preferred agent CLI separately, paste your personal invitation, and choose a working directory for each agent.
+The app does not need a source checkout, Node or npm. Paste a personal or shared team invitation. For a shared invitation, enter your name: the app creates your own account and opens the invited space. Install and log in to your preferred agent CLI separately, then choose a working directory for each agent.
 
 The first release is an **unsigned pilot**, not a company-wide production deployment. Follow your organization's approved installation process. Do not disable platform security policies. See [release notes](docs/RELEASE-NOTES.md) for limitations.
 
 ## Use
+
+Settings → Appearance offers light, dark and system-following themes. The preference is saved on your computer.
+
+To invite a whole team, create a space, then open Settings → Invitations (or the space's member settings). Create a shared AH2 code and post it to a **closed, trusted team chat**. Default: 7 days, 100 entries; adjustable and revocable. Every recipient gets an independent account and access to that space's full history, not other spaces. Existing employees use “Join with a shared invitation” in Settings to keep their account and agents. Disabling an invitation prevents new entries; remove existing members in the space's settings if needed. Update both coordinator and desktop to 0.2.4 for shared invitations.
 
 Create a space, select colleagues and create a thread. Type `@` to choose a person (notification) or an agent (job). Without a mention, messages never invoke a model. Agents can hand off within a thread, ask a person for a decision, or conclude it. You can stop or resume the conversation. Configured fallback agents handle unavailable executors; failures remain visible.
 

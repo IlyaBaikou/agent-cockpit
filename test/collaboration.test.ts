@@ -11,6 +11,7 @@ import { collaborationHttp } from "../src/collab/http.js";
 import { CollaborationClient, hubUrl } from "../src/collab/client.js";
 import { pendingNotices } from "../src/collab/notifications.js";
 import type { Agent, Job, Snapshot, Space, Thread } from "../src/collab/model.js";
+import { decodeInvitation, encodeInvitation } from "../src/collab/invitations.js";
 import { compactionPlan, type ContextPacket } from "../src/collab/context.js";
 
 const alice = "alice-test-credential-0000000000", bob = "bob-test-credential-000000000000";
@@ -214,6 +215,95 @@ describe("shared thread context", () => {
 });
 
 describe("enrollment, persistence, HTTP and notifications", () => {
+  it("enrolls multiple independent employees into only the invited space", async () => {
+    const h = setup(), space = await h.space([]), other = await h.space([]);
+    await h.post(space); await h.post(other, undefined, { content: "Private other-space history" });
+    const invite = await h.call<{ code: string; id: string }>("group-invite", { space: space.id });
+    const first = await h.service.enroll(invite.code, "New colleague");
+    const second = await h.service.enroll(invite.code, "Another colleague");
+    expect(first.employee).not.toBe(second.employee); expect(first.token).not.toBe(second.token);
+    const snapshot = await h.call<Snapshot>("sync", {}, first.token);
+    expect(snapshot.me.name).toBe("New colleague"); expect(snapshot.spaces.map((s) => s.id)).toEqual([space.id]);
+    expect(snapshot.messages.some((m) => m.content === "Hello people")).toBe(true);
+    expect(snapshot.messages.some((m) => m.content === "Private other-space history")).toBe(false);
+    expect(snapshot.groupInvitations).toEqual([]);
+    await h.call("post", { space: space.id, content: "Ready to talk" }, first.token);
+    expect((await h.call<Snapshot>("sync", {}, second.token)).messages.at(-1)?.content).toBe("Ready to talk");
+    const owner = await h.call<Snapshot>("sync");
+    expect(owner.groupInvitations?.[0]?.uses).toBe(2);
+    expect(owner.notices.filter((n) => n.title === "Новый участник спейса")).toHaveLength(2);
+    for (const secret of [invite.code, first.token, second.token, '"hash"', '"usedBy"']) expect(JSON.stringify(owner)).not.toContain(secret);
+    expect(await h.store.read((s) => JSON.stringify(s))).not.toContain(invite.code);
+    await expect(h.call("members", { space: space.id, members: [] }, first.token)).rejects.toThrow("создатель");
+  });
+  it("allows only space owners to issue or revoke group invitations", async () => {
+    const h = setup(), space = await h.space();
+    await expect(h.call("group-invite", { space: space.id }, bob)).rejects.toThrow("владелец");
+    const invite = await h.call<{ id: string; code: string }>("group-invite", { space: space.id });
+    await expect(h.call("revoke-invite", { id: invite.id }, bob)).rejects.toThrow("недоступно");
+    await expect(h.call("group-invite", { space: "missing" })).rejects.toThrow("недоступен");
+  });
+  it("atomically caps concurrent enrollments and leaves no orphan accounts", async () => {
+    const h = setup(), space = await h.space([]);
+    const invite = await h.call<{ code: string }>("group-invite", { space: space.id, maxUses: 2 });
+    const results = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => h.service.enroll(invite.code, `Colleague ${i}`)));
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(2);
+    expect(await h.store.read((s) => s.credentials.length)).toBe(2);
+    expect((await h.call<Snapshot>("sync")).employees).toHaveLength(4);
+    expect((await h.call<Snapshot>("sync")).groupInvitations?.[0]?.uses).toBe(2);
+  });
+  it("expires and revokes invitations without removing existing members", async () => {
+    const h = setup(), space = await h.space([]);
+    const invite = await h.call<{ code: string; id: string }>("group-invite", { space: space.id, days: 1 });
+    const joined = await h.service.enroll(invite.code, "Joined before revocation");
+    await h.call("revoke-invite", { id: invite.id });
+    await expect(h.service.enroll(invite.code, "Too late")).rejects.toThrow("отключено");
+    expect((await h.call<Snapshot>("sync", {}, joined.token)).spaces[0]?.id).toBe(space.id);
+    const expired = await h.call<{ code: string }>("group-invite", { space: space.id, days: 1 });
+    h.advance(24 * 3600_000);
+    await expect(h.service.enroll(expired.code, "Expired")).rejects.toThrow("истекло");
+  });
+  it("validates invitation limits and names without consuming an entry", async () => {
+    const h = setup(), space = await h.space([]);
+    for (const args of [{ days: 0 }, { days: 31 }, { days: 1.5 }, { days: "7" }, { maxUses: 0 }, { maxUses: 1001 }, { maxUses: 2.5 }]) {
+      await expect(h.call("group-invite", { space: space.id, ...args })).rejects.toThrow();
+    }
+    const invite = await h.call<{ code: string }>("group-invite", { space: space.id });
+    for (const name of [undefined, " ", "x".repeat(81), { name: "bad" }]) await expect(h.service.enroll(invite.code, name)).rejects.toThrow("имя");
+    expect((await h.call<Snapshot>("sync")).groupInvitations?.[0]?.uses).toBe(0);
+    expect((await h.call<Snapshot>("sync")).employees).toHaveLength(2);
+  });
+  it("joins existing employees without duplicate identities or consuming repeated entries", async () => {
+    const h = setup(), space = await h.space([]); await h.agent("Bob agent", bob);
+    const invite = await h.call<{ code: string }>("group-invite", { space: space.id, maxUses: 1 });
+    for (let i = 0; i < 2; i++) expect(await h.call("join-invite", { code: invite.code }, bob)).toEqual({ space: space.id });
+    const snapshot = await h.call<Snapshot>("sync", {}, bob);
+    expect(snapshot.me.id).toBe("Bob"); expect(snapshot.agents.some((a) => a.owner === "Bob")).toBe(true);
+    expect(snapshot.employees).toHaveLength(2); expect(snapshot.spaces).toHaveLength(1);
+    await h.call("members", { space: space.id, members: [] });
+    await expect(h.call("join-invite", { code: invite.code }, bob)).rejects.toThrow("отозван");
+    await expect(h.call("join-invite", { code: "missing" }, bob)).rejects.toThrow("не найдено");
+  });
+  it("keeps group membership and usage in PostgreSQL across service restarts", async () => {
+    const mem = newDb({ noAstCoverageCheck: true }), adapter = mem.adapters.createPg();
+    const store = new PostgresStateStore(new adapter.Pool() as unknown as pg.Pool); await store.migrate();
+    const first = new CollaborationService(store, [{ actor: "Alice", token: alice }]);
+    const space = await first.call(alice, "space", { name: "Team" }) as Space;
+    const invite = await first.call(alice, "group-invite", { space: space.id }) as { code: string; id: string };
+    const joined = await first.enroll(invite.code, "Peer");
+    const second = new CollaborationService(store, [{ actor: "Alice", token: alice }]);
+    expect((await second.call(joined.token, "sync") as Snapshot).spaces[0]?.id).toBe(space.id);
+    expect((await second.call(alice, "sync") as Snapshot).groupInvitations?.[0]?.uses).toBe(1);
+    await second.call(alice, "revoke-invite", { id: invite.id });
+    await expect(first.enroll(invite.code, "Late")).rejects.toThrow("отключено");
+    await store.close();
+  });
+  it("encodes reusable and legacy AH2 codes with validated coordinator URLs", () => {
+    const code = encodeInvitation("https://hub.example", "secret-test", true);
+    expect(decodeInvitation(code)).toEqual({ url: "https://hub.example", code: "secret-test", group: true });
+    expect(decodeInvitation(encodeInvitation("https://hub.example", "legacy"))).toEqual({ url: "https://hub.example", code: "legacy", group: false });
+    for (const bad of ["wrong", "AH2:invalid", "AH2:" + Buffer.from("null").toString("base64url"), "AH2:" + Buffer.from(JSON.stringify({ url: "http://remote.example", code: "secret" })).toString("base64url")]) expect(() => decodeInvitation(bad)).toThrow();
+  });
   it("exchanges single-use expiring invitations without exposing credentials", async () => {
     const h = setup(); const invite = await h.call<{ code: string }>("invite", { name: "New colleague" });
     const joined = await h.service.enroll(invite.code); expect((await h.call<Snapshot>("sync", {}, joined.token)).me.name).toBe("New colleague");
@@ -260,6 +350,12 @@ describe("enrollment, persistence, HTTP and notifications", () => {
     const address = server.address(); if (!address || typeof address === "string") throw new Error("no port");
     const url = `http://127.0.0.1:${address.port}`, client = new CollaborationClient(url, alice);
     expect((await client.call<Snapshot>("sync")).me.id).toBe("Alice");
+    const space = await client.call<Space>("space", { name: "HTTP Team" });
+    const invite = await client.call<{ code: string }>("group-invite", { space: space.id });
+    const anonymous = new CollaborationClient(url, "");
+    await expect(anonymous.enroll(invite.code)).rejects.toThrow("имя");
+    const joined = await anonymous.enroll(invite.code, "HTTP Colleague");
+    expect((await new CollaborationClient(url, joined.token).call<Snapshot>("sync")).spaces[0]?.id).toBe(space.id);
     const bad = await fetch(`${url}/v2/rpc`, { method: "POST", body: "[" }); expect(bad.status).toBe(400);
     const cors = await fetch(`${url}/v2/rpc`, { method: "POST", headers: { Origin: "https://evil.test" }, body: "{}" }); expect(cors.status).toBe(403);
     await expect(new CollaborationClient(url, "bad").call("sync")).rejects.toThrow("Нет доступа");
