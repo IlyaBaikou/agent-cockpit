@@ -14,7 +14,13 @@ const time = (value) => new Date(value).toLocaleTimeString("ru", { hour: "2-digi
 const friendly = (text) => String(text).replace(/@\{([au]):([a-zA-Z0-9._-]+)\}/g, (_m, _kind, id) => `@${name(id)}`);
 function toast(message) { $("toast").textContent = message; $("toast").classList.remove("hidden"); setTimeout(() => $("toast").classList.add("hidden"), 6000); }
 function errorText(error) { return String(error.message ?? error).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""); }
-async function safely(action, target = "modal-error") { try { $(target).textContent = ""; return await action(); } catch (error) { $(target).textContent = errorText(error); } }
+async function safely(action, target = "modal-error") {
+  const buttons = target === "modal-error" ? [...$("modal-content").querySelectorAll("button")] : target === "connect-error" ? [...$("connect-form").querySelectorAll("button")] : [];
+  const disabled = buttons.map((b) => b.disabled); buttons.forEach((b) => b.disabled = true);
+  try { $(target).textContent = ""; return await action(); }
+  catch (error) { $(target).textContent = errorText(error); }
+  finally { buttons.forEach((b, i) => b.disabled = disabled[i]); }
+}
 function openModal(title, html) { $("modal-title").textContent = title; $("modal-content").innerHTML = html; $("modal-error").textContent = ""; if (!$("modal").open) $("modal").showModal(); }
 function closeModal() { $("modal").close(); }
 $("modal-close").onclick = closeModal;
@@ -149,10 +155,10 @@ $("members").onclick = () => editSpace(true);
 function editSpace(existing) {
   const space = existing ? currentSpace() : null; if (existing && !space) return;
   if (space && space.owner !== data.me.id) { openModal("Участники спейса", space.members.map((id) => `<p>${esc(name(id))}</p>`).join("") + '<p class="hint">Состав участников меняет создатель спейса.</p>'); return; }
-  openModal(existing ? "Участники спейса" : "Новый спейс", `<form id="space-form">${existing ? "" : '<label>Название<input id="new-space-name" required maxlength="80" placeholder="Интеграция бэка и фронта"></label>'}<p class="hint">Участники видят весь чат и все треды спейса. Их подключённые агенты доступны через @.</p><div class="member-list">${data.employees.filter((e) => e.id !== data.me.id).map((e) => `<label class="check"><input name="member" type="checkbox" value="${e.id}" ${space?.members.includes(e.id) ? "checked" : ""}> ${esc(e.name)}</label>`).join("") || '<p class="hint">Пока здесь только вы. Коллег можно пригласить из настроек.</p>'}</div><div class="modal-actions"><button class="primary">${existing ? "Сохранить" : "Создать спейс"}</button></div></form>`);
+  openModal(existing ? "Участники спейса" : "Новый спейс", `<form id="space-form"><label>Название<input id="new-space-name" required maxlength="80" value="${esc(space?.name ?? "")}" placeholder="Интеграция бэка и фронта"></label><p class="hint">Участники видят весь чат и все треды спейса. Их подключённые агенты доступны через @.</p><div class="member-list">${data.employees.filter((e) => e.id !== data.me.id).map((e) => `<label class="check"><input name="member" type="checkbox" value="${e.id}" ${space?.members.includes(e.id) ? "checked" : ""}> ${esc(e.name)}</label>`).join("") || '<p class="hint">Пока здесь только вы. Коллег можно пригласить из настроек.</p>'}</div><div class="modal-actions"><button class="primary">${existing ? "Сохранить" : "Создать спейс"}</button></div></form>`);
   $("space-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => {
     const members = [...document.querySelectorAll('input[name="member"]:checked')].map((i) => i.value);
-    const result = await window.hub.call(existing ? "members" : "space", { members, ...(existing ? { space: space.id } : { name: $("new-space-name").value }) }); closeModal(); navigate(result.id, null);
+    const result = await window.hub.call(existing ? "members" : "space", { members, name: $("new-space-name").value, ...(existing ? { space: space.id } : {}) }); closeModal(); navigate(result.id, null);
   }); };
 }
 $("add-agent").onclick = () => editAgent();

@@ -26,13 +26,21 @@ export class CollaborationService {
   }
 
   async call(token: string, op: string, input: Record<string, unknown> = {}): Promise<unknown> {
+    // Idle clients must not contend with message/claim transactions. Reads do not
+    // rewrite the state document. Expiry transitions still happen atomically.
+    if (op === "sync" || op === "claim") {
+      const preview = await this.store.read((s) => {
+        const actor = this.authenticate(s, token);
+        if (s.jobs.some((j) => this.active(j) && j.expiresAt < this.now())) return { fast: false, result: null };
+        if (op === "sync") return { fast: true, result: this.snapshot(s, actor) };
+        this.ownedAgent(s, actor, input.agent, input.device);
+        if (!s.jobs.some((j) => j.agent === input.agent && j.status === "queued")) return { fast: true, result: { job: null } };
+        return { fast: false, result: null };
+      });
+      if (preview.fast) return preview.result;
+    }
     return this.store.transact((s) => {
-      for (const credential of this.credentials) {
-        if (!s.employees.some((e) => e.id === credential.actor)) s.employees.push({ id: credential.actor, name: credential.actor });
-      }
-      const actor = this.credentials.find((c) => secureTokenMatch(c.token, token))?.actor
-        ?? s.credentials.find((c) => secureTokenMatch(c.hash, hash(token)))?.employee;
-      requireValue(actor, "Нет доступа. Проверьте приглашение или личный токен", 401);
+      const actor = this.authenticate(s, token);
       this.sweep(s);
       const key = typeof input.requestId === "string" ? input.requestId : undefined;
       if (key) {
@@ -47,6 +55,16 @@ export class CollaborationService {
       }
       return result;
     });
+  }
+
+  private authenticate(s: State, token: string): string {
+    for (const credential of this.credentials) {
+      if (!s.employees.some((e) => e.id === credential.actor)) s.employees.push({ id: credential.actor, name: credential.actor });
+    }
+    const actor = this.credentials.find((c) => secureTokenMatch(c.token, token))?.actor
+      ?? s.credentials.find((c) => secureTokenMatch(c.hash, hash(token)))?.employee;
+    requireValue(actor, "Нет доступа. Проверьте приглашение или личный токен", 401);
+    return actor;
   }
 
   private dispatch(s: State, actor: string, op: string, b: Record<string, unknown>): unknown {
@@ -77,6 +95,7 @@ export class CollaborationService {
       case "members": {
         const space = this.space(s, actor, b.space);
         requireValue(space.owner === actor, "Участников меняет создатель спейса", 403);
+        if (b.name !== undefined) space.name = field(b.name, "Название", 80);
         requireValue(Array.isArray(b.members), "Нужен список участников");
         const members = b.members.map((id) => field(id, "Участник"));
         requireValue(members.every((id) => s.employees.some((e) => e.id === id)), "Неизвестный сотрудник");

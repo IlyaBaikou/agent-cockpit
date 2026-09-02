@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, safeStorage, shell, Tray } from "electron";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { CollaborationClient, hubUrl } from "./collab/client.js";
@@ -39,7 +39,7 @@ process.env.PATH = [...new Set([
 ])].filter(Boolean).join(delimiter);
 app.setName("Agent Hub");
 app.setAppUserModelId("com.animaplay.agenthub");
-if (!app.requestSingleInstanceLock()) app.quit();
+if (!process.argv.includes("--smoke-test") && !app.requestSingleInstanceLock()) app.exit(0);
 app.on("second-instance", () => show());
 
 function show(): void { window?.show(); window?.focus(); }
@@ -129,6 +129,7 @@ function handlers(): void {
   };
   register("hub:state", () => state());
   register("hub:connect", async (input: { url: string; credential: string; type: string }) => {
+    requireValue(safeStorage.isEncryptionAvailable(), "Сначала разблокируйте хранилище ключей ОС; приглашение пока не использовано.");
     requireValue(!settings.agents.length, "Для смены хаба используйте отдельный профиль приложения; локальные агенты уже привязаны к текущему хабу.");
     let url = input.url, credential = input.credential;
     if (credential.startsWith("AH2:")) {
@@ -156,7 +157,7 @@ function handlers(): void {
   });
   register("hub:agent", async (input: LocalAgent) => {
     requireValue(client && snapshot, "Сначала подключитесь к хабу");
-    const directory = resolve(field(input.directory, "Рабочая папка", 4096));
+    const directory = await realpath(resolve(field(input.directory, "Рабочая папка", 4096)));
     requireValue((await stat(directory)).isDirectory(), "Выберите рабочую папку");
     requireValue(["codex", "claude", "cursor"].includes(input.executor), "Неизвестный исполнитель");
     const id = input.id || randomUUID();
@@ -206,6 +207,14 @@ async function createWindow(): Promise<void> {
 
 void app.whenReady().then(async () => {
   try {
+    if (process.argv.includes("--smoke-test")) {
+      await readFile(join(app.getAppPath(), "ui/hub.html"));
+      await readFile(join(app.getAppPath(), "dist/src/desktop-preload.cjs"));
+      const probe = new SqliteStateStore(":memory:");
+      await probe.read((s) => requireValue(s.version === 2, "Invalid packaged store"));
+      await probe.close();
+      console.log("PACKAGE_SMOKE_OK"); app.exit(0); return;
+    }
     await load(); if (settings.local) await startLocal();
     await createWindow();
     if (settings.url) client = new CollaborationClient(settings.url, settings.token);

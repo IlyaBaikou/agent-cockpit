@@ -39,6 +39,21 @@ jobs:
       - run: npm run desktop:dist -- --${{ matrix.platform }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Smoke test packaged application on Mac
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          if [[ "$(uname -m)" == "arm64" ]]; then
+            "installers/mac-arm64/Agent Hub.app/Contents/MacOS/Agent Hub" --smoke-test
+          else
+            "installers/mac/Agent Hub.app/Contents/MacOS/Agent Hub" --smoke-test
+          fi
+      - name: Smoke test packaged application on Windows
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $probe = Start-Process -FilePath 'installers/win-unpacked/Agent Hub.exe' -ArgumentList '--smoke-test' -Wait -PassThru
+          if ($probe.ExitCode -ne 0) { throw "Packaged application failed: $($probe.ExitCode)" }
       - uses: actions/upload-artifact@v4
         with:
           name: installers-${{ matrix.platform }}

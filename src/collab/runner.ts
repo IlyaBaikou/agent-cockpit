@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { CodexAdapter } from "../agents/codex.js";
 import { ClaudeAdapter } from "../agents/claude.js";
 import { CursorAdapter } from "../agents/cursor.js";
@@ -27,9 +27,11 @@ export class EmployeeRunner extends EventEmitter {
   #stopped = false;
   #abort: AbortController | undefined;
   #lastHealth = 0;
+  #lastHeartbeat = 0;
   #ready = false;
   #detail = "Проверка…";
-  constructor(private client: CollaborationClient, readonly agent: LocalAgent, private device: string, private worktreesRoot: string) { super(); }
+  constructor(private client: CollaborationClient, readonly agent: LocalAgent, private device: string, private worktreesRoot: string,
+    private dependencies = { check: checkLocalAgent, adapter: adapterFor }) { super(); }
   start(): void { void this.tick(); this.#timer = setInterval(() => void this.tick(), 5000); }
   stop(): void { this.#stopped = true; clearInterval(this.#timer); this.#abort?.abort(); }
   private async tick(): Promise<void> {
@@ -37,12 +39,15 @@ export class EmployeeRunner extends EventEmitter {
     this.#busy = true;
     try {
       if (Date.now() - this.#lastHealth > 60_000) {
-        try { this.#detail = await checkLocalAgent(this.agent); this.#ready = true; }
+        try { this.#detail = await this.dependencies.check(this.agent); this.#ready = true; }
         catch (error) { this.#detail = error instanceof Error ? error.message : String(error); this.#ready = false; }
         this.#lastHealth = Date.now();
       }
       if (this.#stopped) return;
-      await this.client.call("heartbeat", { agent: this.agent.id, device: this.device, ready: this.#ready, detail: this.#detail });
+      if (Date.now() - this.#lastHeartbeat > 15_000) {
+        await this.client.call("heartbeat", { agent: this.agent.id, device: this.device, ready: this.#ready, detail: this.#detail });
+        this.#lastHeartbeat = Date.now();
+      }
       this.emit("health", { id: this.agent.id, ready: this.#ready, detail: this.#detail });
       // Claim unavailable jobs too after a failed health check: the server will route
       // on its queue timeout, without ever starting this executor.
@@ -74,7 +79,7 @@ export class EmployeeRunner extends EventEmitter {
       if (job.mode === "write") {
         if (!this.agent.allowWrite) throw new Error("Владелец не разрешил изменения");
         const manager = new GitWorktreeManager(this.worktreesRoot);
-        const worktree = await manager.create(job.id, { alias: this.agent.id, path: this.agent.directory, baseRef: "HEAD", verify: [] });
+        const worktree = await manager.create(job.id, { alias: this.agent.id, path: await realpath(this.agent.directory), baseRef: "HEAD", verify: [] });
         workspace = worktree.path;
         this.emit("workspace", { job: job.id, path: workspace });
       }
@@ -83,7 +88,7 @@ export class EmployeeRunner extends EventEmitter {
       const permission = await this.client.call<{ cancelled: boolean }>("lease", { ...leaseBody, started: true });
       if (permission.cancelled || this.#abort.signal.aborted) throw new Error("Задание остановлено");
       if (process.platform === "win32" && prompt.length > 24_000) throw new Error("Контекст превысил лимит запуска Windows CLI в пилоте. Начните новый тред с итогами.");
-      const result = await adapterFor(this.agent).run({ repositoryPath: workspace, prompt, mode: job.mode, signal: this.#abort.signal, protocol: "collaboration" });
+      const result = await this.dependencies.adapter(this.agent).run({ repositoryPath: workspace, prompt, mode: job.mode, signal: this.#abort.signal, protocol: "collaboration" });
       let content = result.content;
       if (job.mode === "write") {
         const diff = await new GitWorktreeManager(this.worktreesRoot).diff(workspace);

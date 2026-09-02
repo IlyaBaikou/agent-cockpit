@@ -162,6 +162,11 @@ describe("enrollment, persistence, HTTP and notifications", () => {
     await expect(h.service.enroll(expired.code)).rejects.toThrow("истекло");
   });
   it("rejects unauthenticated access", async () => { await expect(setup().call("sync", {}, "bad")).rejects.toThrow("Нет доступа"); });
+  it("does not rewrite or increment persistent state on idle syncs/claims", async () => {
+    const h = setup(), a = await h.agent("A");
+    const first = await h.call<Snapshot>("sync"); await h.claim(a); const second = await h.call<Snapshot>("sync");
+    expect(second.revision).toBe(first.revision);
+  });
   it("deduplicates notifications and does not replay all history on first login", () => {
     const n = { seq: 2, employee: "Alice", title: "Answer", body: "", space: "sp", thread: "th" };
     expect(pendingNotices([n], null, 2).pending).toHaveLength(0);
