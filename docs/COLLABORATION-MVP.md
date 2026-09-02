@@ -1,4 +1,4 @@
-# Agent Hub 0.2 — employees, agents, spaces, threads
+# Agent Hub 0.2 — employees, agents, spaces, channels, threads
 
 This is the simplified collaboration model. Professional roles, provider-based identities and Slack transport are not part of v2. The legacy v1 API remains available; its conversation history is not migrated or deleted.
 
@@ -9,10 +9,22 @@ This is the simplified collaboration model. Professional roles, provider-based i
 3. An existing coordinator controller can instead enter the hub URL and their personal control token under manual setup. Never give your token to a colleague.
 4. Set your display name. Under My agents → + choose Codex, Claude Code or Cursor CLI, a name, context and local directory. Multiple agents can use the same provider. Use a different name for each.
 5. Click Check connection. The selected CLI must already be installed and logged in on this computer. An explicit executable path is available when desktop PATH discovery does not find it.
-6. Create a space and select its employee members. Every member sees all of its messages and threads. Only the creator edits membership; there is no per-thread privacy.
-7. Compose a message; type @ and select a human or specific agent. A human mention sends a notification, not a model job. A space-level agent mention creates a thread automatically. One directly invoked agent per message in this pilot.
+6. Create a space and select its members. Add topic channels using Channels → +. Every member sees all channels, messages and threads in that space. Only the space creator edits membership; private channels and per-thread access policies are not implemented.
+7. Compose a message in a channel; type @ and select a human or specific agent. A human mention creates a notification, not a model job. A channel-level agent mention creates a thread in that same channel. One directly invoked agent per message in this pilot.
 
 Local test starts an embedded SQLite coordinator bound only to loopback. It is for one-computer evaluation, not invitations between computers. Use the HTTPS cloud coordinator for a two-person pilot without a VPN.
+
+## Channels, subscriptions and archive (0.2.5)
+
+Space = team membership; channel = an ongoing topic; thread = one question. General remains for announcements and uncategorized questions. Each channel has its own messages and thread cards/list. Any space member can create a channel; its creator or the space owner can edit/archive/restore it. Names are unique within a space, including archived channels. General cannot be renamed or archived. Shared space invitations include all current and future channels.
+
+Archive preserves messages, summaries and code read-only. The server blocks posting and thread actions, cancelling active channel jobs atomically. Started writes may have partial local changes; owners must inspect their worktree. Restoring permits chat again but never launches agents automatically.
+
+Posting in a thread enables following unless explicitly unsubscribed. The header has a follow toggle; old thread owners, human participants and requesters are subscribed during migration. Followers receive new human/agent replies, with mention/follower duplicates combined per message. Direct mentions, job requests/results/failures and requests for a decision are still addressed to the relevant person. These notifications do not invoke models.
+
+Channel mute is per employee, stored on the coordinator. It suppresses all OS banners from that channel, including mentions/decisions, but preserves the inbox. The notification cursor advances past muted notices; unmuting does not replay them. Clicks navigate to the exact channel/thread. Removed space members cannot read channels, change preferences or receive new follower notices. Explicit unsubscribe persists even when posting again. Unread/read badges are not implemented.
+
+A once-only migration adds General and assigns existing records to it without changing IDs, timestamps, content, credentials or valid context checkpoints. New sync clients advertise channelVersion 1; older clients see only General, never flattened content from other channels. Old posts without a channel go to General or an explicitly addressed thread's own channel. Upgrade coordinator and all desktops to 0.2.5. Access remains defined by space membership.
 
 ## Appearance and shared invitations (0.2.4)
 
@@ -30,7 +42,7 @@ Upgraded agents get a shared working summary, recent messages, the space's avail
 
 The chain is capped at 12 answers. It pauses for a human when that limit is reached, an approval is needed, or a person added context while an answer was being generated. Reply and explicitly mention the next agent to continue. Stop cancels pending/running work; a stopped agent's late result cannot restart the chain. Completion marks the thread resolved; humans can reopen it.
 
-Since 0.2.3, general chat includes one clickable card for each thread in the space, including existing threads. Cards appear at the thread's creation time with the creator, initial request preview, live status and count of human/agent replies (excluding the initial request and system notices). Agent replies are not copied into general chat. Clicking opens the same shared conversation; navigating back preserves an unsent draft. Humans can clarify, answer or redirect a discussion in the thread. A plain message adds context without invoking a model; @mention one agent to continue or hand off. If an agent is still working, add a plain clarification and wait for the pause, or Stop before invoking a different agent. Write permissions remain separate from conversational agreement.
+Each channel's chat includes one clickable card for each of its threads. Old threads appear in General. Cards show the creator, initial request, live status and reply count, excluding the initial request and system notices. Agent replies stay inside the thread. Drafts are separate per channel/thread. Humans can clarify, answer or redirect a discussion: a plain message adds context; @mention one agent to continue. If an agent is working, add a plain clarification and wait for the pause, or Stop before invoking another. Write permissions remain separate from conversational agreement.
 
 An unavailable executor is handled by its explicitly configured fallback. Fallbacks are limited to agents owned by the same employee, have a five-hop bound and cannot form configuration cycles. If no fallback is available, an error is recorded in the thread and the requester is notified. Queued requests time out after two minutes; claimed work has a renewable 90-second lease.
 
@@ -64,7 +76,7 @@ Desktop settings live in the OS user-data directory, never in the installation f
 
 ## Deferred before company-wide adoption
 
-SSO, admin lifecycle/deprovisioning and token rotation UI; richer access policies; approval grants for remote fixes; audited/restricted MCP tools; encrypted transport beyond HTTPS for untrusted coordinators; normalized persistent queues; per-thread subscriptions/read badges; full streaming tool logs; quota/cost controls; attachment storage/search; signed/notarized installers; auto-update; complete Windows real-agent and provider-version compatibility coverage.
+SSO, admin lifecycle/deprovisioning and token rotation UI; richer access policies; approval grants for remote fixes; audited/restricted MCP tools; encrypted transport beyond HTTPS for untrusted coordinators; normalized persistent queues; unread/read badges; full streaming tool logs; quota/cost controls; attachment storage/search; signed/notarized installers; auto-update; complete Windows real-agent and provider-version compatibility coverage.
 
 ## Development and releases
 

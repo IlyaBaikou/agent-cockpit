@@ -2,7 +2,8 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const labels = { open: "Открыт", working: "Агенты работают", waiting: "Нужен человек", resolved: "Решено", error: "Ошибка", paused: "На паузе" };
-let appState, data, spaceId = null, threadId = null, renderKey = "", mentionStart = null;
+let appState, data, spaceId = null, channelId = null, threadId = null, renderKey = "", mentionStart = null;
+let channelSupport = false;
 let draftRequest = null;
 let invitationView = null;
 const drafts = new Map();
@@ -11,6 +12,11 @@ const initials = (s) => s.split(/[\s/-]+/).slice(0, 2).map((p) => p[0] ?? "").jo
 const status = (s) => `<span class="status ${esc(s)}">${labels[s] ?? esc(s)}</span>`;
 const currentSpace = () => data?.spaces.find((s) => s.id === spaceId);
 const currentThread = () => data?.threads.find((t) => t.id === threadId);
+const defaultChannel = (space) => `general:${space}`;
+const channelOf = (item) => item?.channel ?? (item?.thread ? data?.threads.find((t) => t.id === item.thread)?.channel : null) ?? defaultChannel(item?.space);
+const channelsIn = (space) => data?.channels?.filter((c) => c.space === space) ?? (space ? [{ id: defaultChannel(space), space, name: "Общий", description: "Объявления и вопросы команды", owner: data?.spaces.find((s) => s.id === space)?.owner, general: true, archived: false }] : []);
+const currentChannel = () => channelsIn(spaceId).find((c) => c.id === channelId);
+const draftKey = () => `${spaceId}/${channelId}/${threadId}`;
 const time = (value) => new Date(value).toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" });
 const friendly = (text) => String(text).replace(/@\{([au]):([a-zA-Z0-9._-]+)\}/g, (_m, _kind, id) => `@${name(id)}`);
 function toast(message) { $("toast").textContent = message; $("toast").classList.remove("hidden"); setTimeout(() => $("toast").classList.add("hidden"), 6000); }
@@ -45,11 +51,14 @@ document.addEventListener("change", (event) => {
 });
 function receive(value) {
   appState = value; data = value.snapshot;
+  channelSupport = Array.isArray(data?.channels);
   applyTheme(value.settings.theme ?? "system");
   $("onboarding").classList.toggle("hidden", Boolean(data)); $("workspace").classList.toggle("hidden", !data);
   if (!data) { if (value.error) $("connect-error").textContent = value.error; return; }
   if (!data.spaces.some((s) => s.id === spaceId)) { spaceId = data.spaces[0]?.id ?? null; threadId = null; renderKey = ""; }
   if (threadId && !data.threads.some((t) => t.id === threadId && t.space === spaceId)) threadId = null;
+  if (threadId) channelId = channelOf(currentThread());
+  else if (!channelsIn(spaceId).some((c) => c.id === channelId)) { channelId = spaceId ? defaultChannel(spaceId) : null; renderKey = ""; }
   $("my-name").textContent = data.me.name; $("avatar").textContent = initials(data.me.name);
   $("connection-dot").classList.toggle("ready", value.connected); $("connection-text").textContent = value.connected ? (value.settings.local ? "Локальный хаб" : "Хаб подключён") : "Связь прервана";
   $("connection-banner").classList.toggle("hidden", !value.error); $("connection-banner").textContent = value.error ? `${value.error}. Восстанавливаем подключение…` : "";
@@ -75,10 +84,12 @@ function renderSidebar() {
   $("my-agents").querySelectorAll("[data-agent]").forEach((b) => b.onclick = () => editAgent(b.dataset.agent));
   $("inbox-count").textContent = data.notices.length || "";
 }
-function navigate(space, thread) {
-  drafts.set(`${spaceId}/${threadId}`, $("composer").value);
-  spaceId = space; threadId = thread; renderKey = ""; draftRequest = null;
-  $("composer").value = drafts.get(`${spaceId}/${threadId}`) ?? ""; $("send-error").textContent = "";
+function navigate(space, thread, channel) {
+  drafts.set(draftKey(), $("composer").value);
+  spaceId = space; threadId = thread;
+  channelId = thread ? channelOf(data?.threads.find((t) => t.id === thread)) : channel ?? (space ? defaultChannel(space) : null);
+  renderKey = ""; draftRequest = null;
+  $("composer").value = drafts.get(draftKey()) ?? ""; $("send-error").textContent = "";
   $("mention-picker").classList.add("hidden");
   if (data) { renderSidebar(); renderTopics(); renderChat(); }
 }
@@ -86,17 +97,64 @@ function renderTopics() {
   const space = currentSpace(); $("space-name").textContent = space?.name ?? "Создайте спейс";
   $("members").textContent = space ? `${space.members.length} участников · Настроить` : "";
   $("general").classList.toggle("active", !threadId);
-  $("threads").innerHTML = data.threads.filter((t) => t.space === spaceId).slice().reverse().map((t) => `<button class="thread-card ${t.id === threadId ? "active" : ""}" data-thread="${t.id}"><strong>${esc(t.title)}</strong><div class="meta">${status(t.status)}<span>${data.messages.filter((m) => m.thread === t.id && m.kind !== "system").length} сообщ.</span></div></button>`).join("");
+  renderChannels();
+  $("threads").innerHTML = data.threads.filter((t) => t.space === spaceId && channelOf(t) === channelId).slice().reverse().map((t) => `<button class="thread-card ${t.id === threadId ? "active" : ""}" data-thread="${t.id}"><strong>${esc(t.title)}</strong><div class="meta">${status(t.status)}<span>${data.messages.filter((m) => m.thread === t.id && m.kind !== "system").length} сообщ.</span></div></button>`).join("");
   $("threads").querySelectorAll("[data-thread]").forEach((b) => b.onclick = () => navigate(spaceId, b.dataset.thread));
 }
+function renderChannels() {
+  const channels = channelsIn(spaceId), selected = currentChannel();
+  const render = (archived) => channels.filter((c) => c.archived === archived).map((c) => {
+    const muted = data.channelPreferences?.some((p) => p.channel === c.id && p.muted);
+    return `<button class="channel-button ${c.id === channelId ? 'active' : ''}" data-channel="${esc(c.id)}" title="${esc(c.description)}"><span>#</span><strong>${esc(c.name)}</strong>${muted ? '<small>тихо</small>' : ''}${c.archived ? '<small>архив</small>' : ''}</button>`;
+  }).join('');
+  $("channels").innerHTML = render(false); $("archived-channels").innerHTML = render(true);
+  $("channel-archive").classList.toggle("hidden", !channels.some((c) => c.archived));
+  if (selected?.archived) $("channel-archive").open = true;
+  document.querySelectorAll("[data-channel]").forEach((b) => b.onclick = () => navigate(spaceId, null, b.dataset.channel));
+  $("add-channel").disabled = !spaceId || !channelSupport || !appState.connected;
+  $("channel-settings").disabled = !selected || !channelSupport;
+  $("mute-channel").disabled = !selected || !channelSupport;
+  const muted = data.channelPreferences?.some((p) => p.channel === channelId && p.muted) ?? false;
+  $("mute-channel").textContent = muted ? "Уведомления заглушены" : "Уведомления включены";
+  $("mute-channel").setAttribute("aria-pressed", String(muted));
+  $("general").textContent = `← Чат # ${selected?.name ?? 'Общий'}`;
+  $("threads-label").textContent = `ТРЕДЫ · ${selected?.name ?? 'Общий'}`;
+}
+function editChannel(existing = false) {
+  if (!spaceId || !channelSupport) return toast("Для каналов обновите сервер хаба до 0.2.5");
+  const channel = existing ? currentChannel() : null;
+  const canEdit = !channel || channel.owner === data.me.id || currentSpace().owner === data.me.id;
+  openModal(channel ? `Канал · ${channel.name}` : "Новый канал", `<form id="channel-form"><label>Название<input id="channel-name" required maxlength="80" placeholder="Геймификация, Игра 1, Математика…" value="${esc(channel?.name ?? '')}" ${!canEdit || channel?.general ? 'readonly' : ''}></label><label>Описание<textarea id="channel-description" maxlength="1000" rows="3" ${canEdit ? '' : 'readonly'} placeholder="Какие вопросы обсуждаем в этом канале">${esc(channel?.description ?? '')}</textarea></label><p class="hint">Все участники спейса видят канал, его сообщения и треды. Приглашения и доступ настраиваются на уровне спейса.</p>${canEdit ? `<div class="modal-actions"><button class="primary">${channel ? 'Сохранить' : 'Создать канал'}</button></div>` : '<p class="hint">Канал меняет его создатель или владелец спейса.</p>'}</form>${channel && !channel.general && canEdit ? `<div class="divider"></div><p class="hint">${channel.archived ? 'Восстановление снова разрешит сообщения. Агентов нужно будет вызвать вручную.' : 'Архив сохранит всю историю для чтения, запретит новые сообщения и остановит работающих здесь агентов. Возможные изменения останутся в их рабочих копиях.'}</p><button id="archive-channel" class="quiet danger">${channel.archived ? 'Восстановить канал' : 'Архивировать канал и остановить агентов'}</button>` : ''}`);
+  $("channel-form").onsubmit = (e) => { e.preventDefault(); if (!canEdit) return; void safely(async () => {
+    const result = await window.hub.call("channel", { space: spaceId, ...(channel ? { id: channel.id } : {}), name: $("channel-name").value, description: $("channel-description").value });
+    closeModal(); navigate(result.space, null, result.id);
+  }); };
+  if ($("archive-channel")) $("archive-channel").onclick = () => void safely(async () => {
+    await window.hub.call("channel-state", { channel: channel.id, archived: !channel.archived });
+    closeModal(); navigate(channel.space, null, channel.id);
+    toast(channel.archived ? "Канал восстановлен. Работа агентов сама не запускается." : "Канал в архиве. История сохранена.");
+  });
+}
+$("add-channel").onclick = () => editChannel();
+$("channel-settings").onclick = () => editChannel(true);
+$("mute-channel").onclick = () => void safely(async () => {
+  const muted = !(data.channelPreferences?.some((p) => p.channel === channelId && p.muted) ?? false);
+  await window.hub.call("channel-preference", { channel: channelId, muted });
+  toast(muted ? "Баннеры этого канала выключены, включая упоминания. Записи останутся в «Уведомлениях»." : "Уведомления канала включены.");
+}, "send-error");
+$("follow-thread").onclick = () => void safely(async () => {
+  const following = !(data.threadSubscriptions?.some((f) => f.thread === threadId && f.following) ?? false);
+  await window.hub.call("thread-subscription", { thread: threadId, following });
+  toast(following ? "Вы подписаны на новые ответы. Заглушение канала имеет приоритет." : "Подписка снята. Прямые обращения и результаты ваших запросов останутся.");
+}, "send-error");
 function generalThreadCards() {
   const messages = new Map();
   for (const m of data.messages) {
-    if (m.space !== spaceId || !m.thread || m.kind === "system") continue;
+    if (m.space !== spaceId || channelOf(m) !== channelId || !m.thread || m.kind === "system") continue;
     if (!messages.has(m.thread)) messages.set(m.thread, []);
     messages.get(m.thread).push(m);
   }
-  return data.threads.filter((t) => t.space === spaceId).map((thread) => {
+  return data.threads.filter((t) => t.space === spaceId && channelOf(t) === channelId).map((thread) => {
     const replies = messages.get(thread.id) ?? [];
     return { thread, root: replies[0], replies: Math.max(0, replies.length - 1), createdAt: thread.createdAt ?? replies[0]?.createdAt ?? 0 };
   });
@@ -107,21 +165,26 @@ function renderThreadCard(card) {
   return `<article class="message thread-announcement"><span class="avatar">${esc(initials(name(t.owner)))}</span><div class="message-main"><div class="message-head"><strong>${esc(name(t.owner))}</strong><span class="agent-tag">НАЧАЛ ОБСУЖДЕНИЕ</span><time>${time(card.createdAt)}</time></div><button type="button" class="thread-link-card" data-open-thread="${esc(t.id)}" aria-label="Открыть тред: ${esc(t.title)}. ${esc(labels[t.status] ?? t.status)}. Ответов: ${card.replies}"><span class="thread-link-label">↗ ОБСУЖДЕНИЕ В ТРЕДЕ</span><strong>${esc(t.title)}</strong>${preview ? `<span class="thread-link-preview">${esc(preview)}</span>` : ""}<span class="thread-link-meta">${status(t.status)}<span>Ответов: ${card.replies}</span><span class="thread-link-open">Открыть тред →</span></span></button></div></article>`;
 }
 function renderChat() {
-  const thread = currentThread(), space = currentSpace();
-  $("chat-title").textContent = thread?.title ?? (space ? "Общий чат" : "Добро пожаловать в Agent Hub");
-  $("chat-eyebrow").textContent = thread ? `ТРЕД · ${space?.name ?? ""}` : "ОБЩЕНИЕ КОМАНДЫ";
-  $("chat-subtitle").innerHTML = thread ? `${status(thread.status)} &nbsp; Начал ${esc(name(thread.owner))}` : "Люди общаются здесь. Агентский разбор уходит в отдельный тред.";
+  const thread = currentThread(), space = currentSpace(), channel = currentChannel();
+  const archived = channel?.archived === true;
+  $("chat-title").textContent = thread?.title ?? (channel ? `# ${channel.name}` : "Добро пожаловать в Agent Hub");
+  $("chat-eyebrow").textContent = thread ? `${space?.name ?? ""} / # ${channel?.name ?? "Общий"} / ТРЕД` : `${space?.name ?? ""} / КАНАЛ`;
+  $("chat-subtitle").innerHTML = thread ? `${status(thread.status)} &nbsp; Начал ${esc(name(thread.owner))}` : esc(channel?.description || "Обсуждения команды. Один вопрос — один тред.");
   $("thread-actions").classList.toggle("hidden", !thread);
   $("resolve").textContent = thread?.status === "resolved" ? "↺ Открыть" : "✓ Завершить";
-  const messages = data.messages.filter((m) => m.space === spaceId && m.thread === threadId);
+  const messages = data.messages.filter((m) => m.space === spaceId && channelOf(m) === channelId && m.thread === threadId);
   const cards = threadId ? [] : generalThreadCards();
   const jobs = data.jobs.filter((j) => j.thread === threadId && ["queued", "running"].includes(j.status));
   const needsPerson = thread && ["waiting", "paused"].includes(thread.status);
-  $("job-status").classList.toggle("hidden", !jobs.length && !needsPerson);
-  $("job-status").textContent = jobs.length ? jobs.map((j) => `${name(j.agent)} ${j.status === "queued" ? "ожидает свободного раннера" : "работает с контекстом треда"} · ${j.mode === "write" ? "изменения" : "разбор"}`).join(" · ") : needsPerson ? "Чтобы продолжить: напишите ответ или уточнение и укажите через @ агента, который должен подхватить разбор." : "";
+  $("job-status").classList.toggle("hidden", !archived && !jobs.length && !needsPerson);
+  $("job-status").textContent = archived ? "Канал в архиве: история доступна для чтения. Восстановите канал в его настройках, чтобы продолжить." : jobs.length ? jobs.map((j) => `${name(j.agent)} ${j.status === "queued" ? "ожидает свободного раннера" : "работает с контекстом треда"} · ${j.mode === "write" ? "изменения" : "разбор"}`).join(" · ") : needsPerson ? "Чтобы продолжить: напишите ответ или уточнение и укажите через @ агента, который должен подхватить разбор." : "";
   document.querySelector(".composer-hint").innerHTML = thread ? "@агент — продолжить разбор · без @ — добавить контекст · @сотрудник — уведомить <span>⌘ / Ctrl + Enter</span>" : "@сотрудник — уведомить · @агент — создать тред · без @ — обычный чат <span>⌘ / Ctrl + Enter</span>";
-  $("send").disabled = !space || !appState.connected;
-  const key = JSON.stringify([spaceId, threadId, messages, cards, data.employees, data.agents.map((a) => [a.id, a.name, a.owner]), data.jobs.filter((j) => j.thread === threadId).map((j) => [j.id,j.status])]);
+  for (const id of ["send", "composer", "mode", "mention-button", "new-thread", "stop", "resolve"]) $(id).disabled = archived || !space || !appState.connected;
+  $("follow-thread").classList.toggle("hidden", !thread || !channelSupport);
+  const following = data.threadSubscriptions?.some((f) => f.thread === threadId && f.following) ?? false;
+  $("follow-thread").textContent = following ? "✓ Вы подписаны на тред" : "Подписаться на тред";
+  $("follow-thread").setAttribute("aria-pressed", String(following));
+  const key = JSON.stringify([spaceId, channelId, threadId, messages, cards, thread?.memory, data.employees, data.agents.map((a) => [a.id, a.name, a.owner]), data.jobs.filter((j) => j.thread === threadId).map((j) => [j.id,j.status])]);
   if (key === renderKey) return;
   const wasNearBottom = $("messages").scrollHeight - $("messages").scrollTop - $("messages").clientHeight < 110;
   const switched = !renderKey; renderKey = key;
@@ -184,23 +247,26 @@ $("mention-button").onclick = () => { $("composer").focus(); showMentions(true);
 $("composer-form").onsubmit = (event) => {
   event.preventDefault(); void safely(async () => {
     const content = encodeMentions($("composer").value.trim()); if (!content) return;
-    const request = { space: spaceId, thread: threadId, content, mode: $("mode").value };
+    if (currentChannel()?.archived) throw new Error("Канал в архиве");
+    const request = { space: spaceId, ...(channelSupport ? { channel: channelId } : {}), thread: threadId, content, mode: $("mode").value };
     const key = JSON.stringify(request); if (!draftRequest || draftRequest.key !== key) draftRequest = { key, id: crypto.randomUUID() };
     $("send").disabled = true;
     try {
       const result = await window.hub.call("post", { ...request, requestId: draftRequest.id });
-      $("composer").value = ""; drafts.delete(`${spaceId}/${threadId}`); draftRequest = null;
+      $("composer").value = ""; drafts.delete(draftKey()); draftRequest = null;
       if (!threadId && result.thread) navigate(spaceId, result.thread.id);
-    } finally { $("send").disabled = false; }
+    } finally { $("send").disabled = currentChannel()?.archived || !appState.connected; }
   }, "send-error");
 };
-$("general").onclick = () => navigate(spaceId, null);
+$("general").onclick = () => navigate(spaceId, null, channelId);
+$("thread-actions").prepend($("follow-thread"));
 $("stop").onclick = () => void safely(() => window.hub.call("thread-state", { thread: threadId, status: "paused" }), "send-error");
 $("resolve").onclick = () => void safely(() => window.hub.call("thread-state", { thread: threadId, status: currentThread()?.status === "resolved" ? "open" : "resolved" }), "send-error");
 $("new-thread").onclick = () => {
   if (!spaceId) return toast("Сначала создайте спейс");
+  if (currentChannel()?.archived) return toast("Сначала восстановите канал из архива");
   openModal("Новый тред", '<form id="thread-form"><label>Тема<input id="thread-title" required maxlength="160" placeholder="Например: контракт новой геймификации"></label><label>С чего начнём?<textarea id="thread-message" rows="5" required placeholder="Опишите вопрос, добавьте ссылки на Jira, Confluence или PR"></textarea></label><p class="hint">После создания вызовите нужного агента через @ в строке сообщения.</p><div class="modal-actions"><button class="primary">Создать тред</button></div></form>');
-  $("thread-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { const result = await window.hub.call("post", { space: spaceId, title: $("thread-title").value, content: $("thread-message").value, newThread: true }); closeModal(); navigate(spaceId, result.thread.id); }); };
+  $("thread-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { const result = await window.hub.call("post", { space: spaceId, ...(channelSupport ? { channel: channelId } : {}), title: $("thread-title").value, content: $("thread-message").value, newThread: true }); closeModal(); navigate(spaceId, result.thread.id); }); };
 };
 $("add-space").onclick = () => editSpace(false);
 $("members").onclick = () => editSpace(true);
@@ -265,10 +331,10 @@ function openInvitations(selectedSpace = spaceId) {
 $("inbox").onclick = () => {
   openModal("Уведомления", data.notices.slice().reverse().slice(0, 100).map((n, i) => `<button class="inbox-item" data-index="${i}"><strong>${esc(n.title)}</strong><small>${esc(friendly(n.body))}</small></button>`).join("") || '<p class="hint">Пока нет уведомлений. Здесь появятся упоминания и ответы на ваши запросы.</p>');
   const notices = data.notices.slice().reverse().slice(0, 100);
-  $("modal-content").querySelectorAll("[data-index]").forEach((b) => b.onclick = () => { const n = notices[Number(b.dataset.index)]; closeModal(); navigate(n.space, n.thread); });
+  $("modal-content").querySelectorAll("[data-index]").forEach((b) => b.onclick = () => { const n = notices[Number(b.dataset.index)]; closeModal(); navigate(n.space, n.thread, n.channel); });
 };
 $("connect-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { const result = await window.hub.connect({ url: $("hub-url").value.trim(), credential: $("credential").value.trim(), name: $("join-name").value.trim(), type: $("raw-token").checked ? "token" : "invite" }); $("credential").value = ""; receive(result); }, "connect-error"); };
 $("local-test").onclick = () => void safely(async () => receive(await window.hub.local()), "connect-error");
 window.hub.onChanged(receive);
-window.hub.onNavigate(({ space, thread }) => navigate(space, thread));
+window.hub.onNavigate(({ space, thread, channel }) => navigate(space, thread, channel));
 void window.hub.state().then(receive);

@@ -1,6 +1,6 @@
 # Agent Hub
 
-A desktop collaboration pilot for employees and their agents. Each employee can connect multiple named Codex, Claude Code or Cursor CLI agents. Spaces contain ordinary human chat and threaded agent conversations, with human intervention and native notifications.
+A desktop collaboration pilot for employees and their agents. Each employee can connect multiple named Codex, Claude Code or Cursor CLI agents. Spaces contain topic channels, each with human chat and threaded agent conversations, human intervention and native notifications.
 
 ## Install
 
@@ -20,7 +20,11 @@ Settings → Appearance offers light, dark and system-following themes. The pref
 
 To invite a whole team, create a space, then open Settings → Invitations (or the space's member settings). Create a shared AH2 code and post it to a **closed, trusted team chat**. Default: 7 days, 100 entries; adjustable and revocable. Every recipient gets an independent account and access to that space's full history, not other spaces. Existing employees use “Join with a shared invitation” in Settings to keep their account and agents. Disabling an invitation prevents new entries; remove existing members in the space's settings if needed. Update both coordinator and desktop to 0.2.4 for shared invitations.
 
-Create a space, select colleagues and create a thread. Type `@` to choose a person (notification) or an agent (job). Without a mention, messages never invoke a model. Agents can hand off within a thread, ask a person for a decision, or conclude it. You can stop or resume the conversation. Configured fallback agents handle unavailable executors; failures remain visible.
+Create a space and select colleagues. Use **Channels → +** for topics such as Gamification, Game 1 and Mathematics. Every channel has its own chat and question-specific threads. The existing history moves into General automatically. All channels inherit space membership. Any member can create a channel; its creator or the space owner manages it. Archive preserves history read-only and stops active channel jobs; restore does not restart agents.
+
+Type `@` to choose a person (notification) or an agent (job). An agent mention in channel chat creates a thread with a card in the same channel. Without a mention, messages never invoke a model. Agents can hand off within a thread, ask a person for a decision, or conclude it. You can stop or resume the conversation. Configured fallback agents handle unavailable executors; failures remain visible.
+
+Participation follows a thread automatically unless explicitly unfollowed. Follow/unfollow in its header; mute/unmute below the channel list. Mute suppresses all channel banners, including mentions, but keeps the in-app inbox. Explicit requests/results/failures still create notices independently of following. Notification clicks open the correct channel/thread. Upgrade coordinator and **all desktops to 0.2.5**; old clients see General only.
 
 Write jobs require the agent owner's explicit request and local opt-in. They run in separate Git worktrees. The app shares the result/diff, but never commits, pushes, merges or deploys. Links to Jira, Confluence and pull requests are supported as discussion context; access depends on each CLI's own configured tools and credentials.
 

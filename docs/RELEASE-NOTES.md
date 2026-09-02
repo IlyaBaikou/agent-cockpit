@@ -1,4 +1,14 @@
-Employee-owned agents, spaces and threads — pilot 0.2.4.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.5.
+
+New in 0.2.5:
+
+- Spaces contain named channels (General, Gamification, Game 1, Mathematics, etc.), each with its own chat, threads and live thread cards. Creating a channel never invokes a model.
+- Existing chat and threads migrate into General once, preserving IDs, timestamps, content, credentials and context checkpoints. No history is deleted.
+- All space members see all channels and may create them. A channel's creator or the space owner can edit/archive/restore it. General cannot be renamed or archived.
+- Archived channels remain readable; posting and thread actions are blocked, queued/running jobs are cancelled. Restoring does not automatically restart agents.
+- Thread participation enables following unless explicitly unsubscribed. Follow/unfollow and per-channel mute controls are available. Mute suppresses all OS banners for that channel, including mentions and decisions, but keeps the in-app inbox. Direct requests/results/failures remain addressable independently of following.
+- Notifications open their exact channel/thread; drafts stay separate. Agent context remains scoped to its thread and includes the channel name.
+- Update both coordinator and all desktop apps. Older clients see General only instead of flattening other channels into the old chat.
 
 New in 0.2.4:
 

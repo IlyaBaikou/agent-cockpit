@@ -7,14 +7,20 @@ export type Agent = {
   seenAt: number; ready: boolean; detail: string;
 };
 export type Space = { id: string; name: string; owner: string; members: string[]; createdAt: number };
+export type Channel = { id: string; space: string; name: string; description: string; owner: string; createdAt: number; archived: boolean; general: boolean };
+export type ChannelPreference = { employee: string; channel: string; muted: boolean };
+export type ThreadSubscription = { employee: string; thread: string; following: boolean };
+export const generalChannelId = (space: string): string => `general:${space}`;
 export type Thread = {
   id: string; space: string; title: string; owner: string; createdAt: number;
+  channel?: string;
   status: "open" | "working" | "waiting" | "resolved" | "error" | "paused";
   revision: number;
   memory?: ThreadMemory;
 };
 export type Message = {
   id: string; space: string; thread: string | null; author: string;
+  channel?: string;
   kind: "human" | "agent" | "system"; content: string; createdAt: number;
 };
 export type Job = {
@@ -27,6 +33,7 @@ export type Job = {
 };
 export type Notice = {
   seq: number; employee: string; title: string; body: string; space: string; thread: string | null;
+  channel?: string; silent?: boolean; event?: string;
 };
 export type GroupInvitation = {
   id: string; owner: string; space: string; hash: string; createdAt: number;
@@ -39,12 +46,16 @@ export type State = {
   credentials: { employee: string; hash: string }[];
   invitations: { employee: string; hash: string; expiresAt: number }[];
   groupInvitations?: GroupInvitation[];
+  channelsVersion?: 1; channels?: Channel[];
+  channelPreferences?: ChannelPreference[]; threadSubscriptions?: ThreadSubscription[];
   requests: { actor: string; key: string; result: unknown }[];
 };
 export type Snapshot = {
   me: Employee; revision: number; employees: Employee[]; agents: Agent[]; spaces: Space[];
   threads: Thread[]; messages: Message[]; jobs: Omit<Job, "lease">[]; notices: Notice[]; sequence: number;
   groupInvitations?: GroupInvitationInfo[];
+  channels?: Channel[];
+  channelPreferences?: ChannelPreference[]; threadSubscriptions?: ThreadSubscription[];
 };
 export function emptyState(): State {
   return { version: 2, revision: 0, employees: [], agents: [], spaces: [], threads: [], messages: [], jobs: [], notices: [], sequence: 0, credentials: [], invitations: [], requests: [] };

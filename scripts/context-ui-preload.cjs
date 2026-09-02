@@ -8,6 +8,11 @@ const snapshot = {
   agents: [{ id: "a", owner: "owner", name: "Backend Codex", executor: "codex", enabled: true, ready: true },
     { id: "b", owner: "peer", name: "Frontend Claude", executor: "claude", enabled: true, ready: true }],
   spaces: [{ id: "demo-space", name: "Интеграция", owner: "owner", members: ["owner", "peer"] }],
+  channels: [{ id: "general:demo-space", space: "demo-space", name: "Общий", description: "Объявления и вопросы команды", owner: "owner", archived: false, general: true },
+    { id: "gamification", space: "demo-space", name: "Геймификация", description: "Прогресс, уровни и награды", owner: "owner", archived: false, general: false },
+    { id: "game-one", space: "demo-space", name: "Игра 1", description: "Интеграция игрового клиента", owner: "peer", archived: false, general: false },
+    { id: "math", space: "demo-space", name: "Математика", description: "Вероятности и расчёты", owner: "owner", archived: false, general: false }],
+  channelPreferences: [], threadSubscriptions: [{ thread: "demo-thread", employee: "owner", following: true }],
   threads: [{ id: "demo-thread", space: "demo-space", owner: "owner", title: "Контракт прогресса · тестовый пример", status: "waiting", revision: 1,
     memory: { version: 1, summary: "**Решение:** сохраняем совместимость текущего API.\n\n**Открытый вопрос:** согласовать название нового поля с фронтендом.\n\nИзменения кода пока не одобрены. Нужен ответ владельца.", citations: ["m1", "m2"], agent: "a", createdAt: now } }],
   messages: [{ id: "g1", space: "demo-space", thread: null, kind: "human", author: "peer", content: "Коллеги, давайте уточним совместимость нового поля. Разбор с агентами — в отдельном треде.", createdAt: now - 60_000 },
@@ -17,15 +22,33 @@ const snapshot = {
   jobs: [{ id: "j", thread: "demo-thread", agent: "a", status: "done", mode: "read", contextStats: { historyChars: 52000, promptChars: 17000, summaryInputChars: 33000, summaryOutputChars: 1300, compacted: true, memoryReused: false } }],
 };
 const settings = { agents: [], local: false, url: "https://hub.example", theme: "system", notifications: true };
-const state = () => ({ snapshot, connected: true, version: "0.2.4", settings });
+const state = () => ({ snapshot, connected: true, version: "0.2.5", settings });
 let changed = () => {};
 const calls = [];
+let messageSequence = 0;
 contextBridge.exposeInMainWorld("hub", {
   onChanged: (callback) => { changed = callback; }, onNavigate: () => {}, state: async () => state(),
   preferences: async (input) => { calls.push({ op: "preferences", input }); Object.assign(settings, input); changed(state()); },
   invite: async (input) => { calls.push({ op: "invite", input }); return { copied: true }; },
   joinInvite: async (input) => { calls.push({ op: "joinInvite", input }); return { space: "demo-space" }; },
-  call: async (op, input) => { calls.push({ op, input }); if (op === "revoke-invite") { snapshot.groupInvitations[0].revoked = true; changed(state()); } return {}; },
+  call: async (op, input) => {
+    calls.push({ op, input }); let result = {};
+    if (op === "revoke-invite") snapshot.groupInvitations[0].revoked = true;
+    if (op === "channel") {
+      const c = snapshot.channels.find(c => c.id === input.id) ?? { id: "created-channel", space: input.space, owner: "owner", general: false, archived: false };
+      Object.assign(c, { name: input.name, description: input.description }); if (!input.id) snapshot.channels.push(c); result = c;
+    }
+    if (op === "channel-state") snapshot.channels.find(c => c.id === input.channel).archived = input.archived;
+    if (op === "channel-preference") snapshot.channelPreferences = [{ employee: "owner", channel: input.channel, muted: input.muted }];
+    if (op === "thread-subscription") snapshot.threadSubscriptions = [{ employee: "owner", thread: input.thread, following: input.following }];
+    if (op === "post") {
+      const thread = input.newThread || input.content.includes('@{a:') ? { id: "created-thread", space: input.space, channel: input.channel, title: input.title ?? "Проверка контракта прогресса", owner: "owner", status: "open", createdAt: Date.now() } : null;
+      if (thread) snapshot.threads.push(thread);
+      const message = { id: `created-message-${++messageSequence}`, space: input.space, channel: input.channel, thread: thread?.id ?? input.thread ?? null, kind: "human", author: "owner", content: input.content, createdAt: Date.now() };
+      snapshot.messages.push(message); result = { thread, message };
+    }
+    changed(state()); return result;
+  },
   connect: async (input) => { calls.push({ op: "connect", input }); return state(); },
   testCalls: () => calls,
 });

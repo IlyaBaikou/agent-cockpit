@@ -10,6 +10,20 @@
 .invite-item{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid #e9eaf2}
 .invite-item strong{font-size:12px;overflow-wrap:anywhere}
 .invite-item small{display:block;margin-top:5px;color:#737b91;line-height:1.6}
+.channels{display:grid;gap:3px;padding:0 12px}
+.channel-button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:transparent;color:#59617c;padding:10px 12px}
+.channel-button strong{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.channel-button span{color:#9398b0}.channel-button small{font-size:9px;color:#8b809e}
+.channel-button.active{background:#eae5f8;color:#6b50b8}
+.channel-archive{margin:12px 14px 0;font-size:11px;color:#838ba3}.channel-archive summary{cursor:pointer;padding:5px}
+.channel-tools{display:flex;flex-wrap:wrap;gap:4px 12px;padding:13px 23px 0}.channel-tools button{font-size:10px}
+.topics .general{font-size:11px;overflow-wrap:anywhere}.topics .section-label>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-header{flex-shrink:0;flex-wrap:wrap}.chat-header>div:first-child{min-width:0;flex:1}.chat-header .actions{flex-wrap:wrap;max-width:100%}
+.chat-header .eyebrow{line-height:1.6}.chat-header #follow-thread{font-size:10px;padding:6px 8px}
+[data-theme="dark"] .channel-button{background:transparent;color:#b9c3db}
+[data-theme="dark"] .channel-button:hover{background:#272c40}
+[data-theme="dark"] .channel-button.active{background:#352e4a;color:#d2bcff}
+[data-theme="dark"] .channel-button small,[data-theme="dark"] .channel-archive{color:#a8a7c2}
 .settings-section details>summary{cursor:pointer;font-size:12px;color:#737b91;margin:18px 0}
 
 /* Explicit dark surfaces, including dialogs and native controls. The sidebar

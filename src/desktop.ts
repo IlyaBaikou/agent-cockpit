@@ -26,7 +26,7 @@ let client: CollaborationClient | undefined;
 let snapshot: Snapshot | undefined;
 let connectionError = "";
 let quitting = false;
-let syncing = false;
+let syncing: Promise<void> | undefined;
 let localServer: Server | undefined;
 let localStore: SqliteStateStore | undefined;
 let poll: NodeJS.Timeout | undefined;
@@ -104,24 +104,27 @@ function startRunners(): void {
     runners.set(agent.id, runner); runner.start();
   }
 }
-async function sync(): Promise<void> {
-  if (!client || syncing || quitting) return;
-  syncing = true;
+async function sync(fresh = false): Promise<void> {
+  if (!client || quitting) return;
+  if (syncing) { await syncing; if (fresh) await sync(); return; }
+  const task = performSync(); syncing = task;
+  try { await task; } finally { if (syncing === task) syncing = undefined; }
+}
+async function performSync(): Promise<void> {
   try {
-    snapshot = await client.call<Snapshot>("sync"); connectionError = "";
+    snapshot = await client!.call<Snapshot>("sync", { channelVersion: 1 }); connectionError = "";
     const notices = pendingNotices(snapshot.notices, settings.cursor, snapshot.sequence);
     if (notices.cursor !== settings.cursor) {
       settings.cursor = notices.cursor; await save();
       if (settings.notifications && Notification.isSupported()) for (const notice of notices.pending.slice(-5)) {
         const notification = new Notification({ title: notice.title, body: notice.title === "Нужно ваше решение" ? "Откройте тред, чтобы ответить и продолжить работу." : "В вашем спейсе есть обновление. Нажмите, чтобы открыть.", silent: false });
-        notification.on("click", () => { show(); window?.webContents.send("hub:navigate", { space: notice.space, thread: notice.thread }); });
+        notification.on("click", () => { show(); window?.webContents.send("hub:navigate", { space: notice.space, thread: notice.thread, channel: notice.channel }); });
         notification.on("failed", (_event, error) => { health.set("notifications", { ready: false, detail: error }); changed(); });
         notification.show();
       }
     }
     startRunners(); changed();
   } catch (error) { connectionError = error instanceof Error ? error.message : String(error); changed(); }
-  finally { syncing = false; }
 }
 
 function handlers(): void {
@@ -143,11 +146,11 @@ function handlers(): void {
     const candidate = new CollaborationClient(url, input.type === "invite" ? "" : credential);
     const token = input.type === "invite" ? (await candidate.enroll(credential, input.name)).token : credential;
     const connected = new CollaborationClient(url, token);
-    const result = await connected.call<Snapshot>("sync");
+    const result = await connected.call<Snapshot>("sync", { channelVersion: 1 });
     await stopRunners();
     settings.url = connected.url; settings.token = token; settings.local = false; settings.cursor = null;
     await save(); client = connected; snapshot = result;
-    await sync(); return state();
+    await sync(true); return state();
   });
   register("hub:local", async () => {
     requireValue(!settings.url, "Хаб уже подключён");
@@ -155,9 +158,9 @@ function handlers(): void {
     await startLocal(); await save(); client = new CollaborationClient(settings.url, settings.token); await sync(); return state();
   });
   register("hub:call", async (op: string, input: Record<string, unknown>) => {
-    requireValue(client && ["post", "space", "members", "thread-state", "profile", "revoke-invite"].includes(op), "Недоступная операция");
+    requireValue(client && ["post", "space", "members", "thread-state", "profile", "revoke-invite", "channel", "channel-state", "channel-preference", "thread-subscription"].includes(op), "Недоступная операция");
     const result = await client.call(op, { ...input, requestId: typeof input.requestId === "string" ? input.requestId : randomUUID() });
-    await sync(); return result;
+    await sync(true); return result;
   });
   register("hub:agent", async (input: LocalAgent) => {
     requireValue(client && snapshot, "Сначала подключитесь к хабу");
@@ -168,7 +171,7 @@ function handlers(): void {
     const agent: LocalAgent = { id, name: field(input.name, "Имя", 80), description: String(input.description ?? "").slice(0, 2000), directory, binary: String(input.binary ?? "").trim(), executor: input.executor, enabled: input.enabled === true, allowWrite: input.allowWrite === true, fallback: input.fallback || null };
     await client.call<Agent>("agent", { ...agent, device: settings.device, directory: undefined, binary: undefined });
     runners.get(id)?.stop(); runners.delete(id);
-    settings.agents = [...settings.agents.filter((a) => a.id !== id), agent]; await save(); await sync(); return agent;
+    settings.agents = [...settings.agents.filter((a) => a.id !== id), agent]; await save(); await sync(true); return agent;
   });
   register("hub:check", async (input: LocalAgent) => ({ detail: await checkLocalAgent(input) }));
   register("hub:directory", async () => (await dialog.showOpenDialog(window!, { properties: ["openDirectory"] })).filePaths[0] ?? "");
@@ -188,14 +191,14 @@ function handlers(): void {
     requireValue(input.kind === "personal" || input.kind === "group", "Выберите тип приглашения");
     const group = input.kind === "group";
     const result = await client.call<{ code: string; id?: string }>(group ? "group-invite" : "invite", { ...input, requestId: randomUUID() });
-    clipboard.writeText(encodeInvitation(settings.url, result.code, group)); await sync(); return { copied: true, id: result.id };
+    clipboard.writeText(encodeInvitation(settings.url, result.code, group)); await sync(true); return { copied: true, id: result.id };
   });
   register("hub:join-invite", async (value: string) => {
     requireValue(client && snapshot, "Сначала подключитесь к хабу");
     const invite = decodeInvitation(value);
     requireValue(invite.url === client.url, "Это приглашение в другой хаб. Текущий аккаунт не изменён");
     const result = await client.call("join-invite", { code: invite.code });
-    await sync(); return result;
+    await sync(true); return result;
   });
   register("hub:link", async (url: string) => {
     const parsed = new URL(url); requireValue(["https:", "http:"].includes(parsed.protocol) && !parsed.username && !parsed.password, "Небезопасная ссылка");
