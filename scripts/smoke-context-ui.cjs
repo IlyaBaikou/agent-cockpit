@@ -25,7 +25,9 @@ app.whenReady().then(async () => {
     `);
     if (!result.memoryVisible || !result.metricsVisible || result.messages !== 3) throw new Error(JSON.stringify(result));
     if (process.argv[2]) writeFileSync(resolve(process.argv[2]), (await window.webContents.capturePage()).toPNG());
-    console.log("CONTEXT_UI_SMOKE_OK", result); clearTimeout(watchdog); window.destroy(); app.exit(0);
+    console.log("CONTEXT_UI_SMOKE_OK", result); clearTimeout(watchdog); app.exit(0);
   } catch (error) { console.error(error); app.exit(1); }
 });
-app.on("will-quit", () => rmSync(profile, { recursive: true, force: true }));
+// Chromium can still hold profile files on Windows during quit. Cleanup is
+// best-effort; an uncaught EBUSY/EPERM would display a blocking Electron dialog.
+app.on("quit", () => { try { rmSync(profile, { recursive: true, force: true }); } catch { /* synthetic OS-temp profile only */ } });

@@ -1,6 +1,6 @@
 Employee-owned agents, spaces and threads — pilot 0.2.2.
 
-0.2.2 hardens the Windows CI interface check with software rendering, a direct local Electron launcher and a bounded timeout. Application context behavior is unchanged from 0.2.1.
+0.2.2 hardens the Windows CI interface check with best-effort temporary-profile cleanup, software rendering, a direct local Electron launcher and a bounded timeout. Application context behavior is unchanged from 0.2.1.
 
 New in 0.2.1:
 
