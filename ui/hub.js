@@ -3,6 +3,7 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const labels = { open: "Открыт", working: "Агенты работают", waiting: "Нужен человек", resolved: "Решено", error: "Ошибка", paused: "На паузе" };
 let appState, data, spaceId = null, channelId = null, threadId = null, renderKey = "", mentionStart = null;
+let mentionEnd = null, mentionIndex = -1, visibleMentions = [];
 let channelSupport = false;
 const outbox = new Map();
 const decisionsInFlight = new Set();
@@ -21,6 +22,8 @@ const channelOf = (item) => item?.channel ?? (item?.thread ? data?.threads.find(
 const channelsIn = (space) => data?.channels?.filter((c) => c.space === space) ?? (space ? [{ id: defaultChannel(space), space, name: "Общий", description: "Объявления и вопросы команды", owner: data?.spaces.find((s) => s.id === space)?.owner, general: true, archived: false }] : []);
 const currentChannel = () => channelsIn(spaceId).find((c) => c.id === channelId);
 const draftKey = () => `${spaceId}/${channelId}/${threadId}`;
+const sendingIn = (space = spaceId, channel = channelId, thread = threadId) => [...outbox.values()].some((p) => p.state === 'sending'
+  && p.author === data?.me.id && p.hub === appState?.settings.url && p.request.space === space && p.channel === channel && (p.request.thread ?? null) === thread);
 const time = (value) => new Date(value).toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" });
 const badge = (count) => count ? `<b class="unread-badge" aria-label="Непрочитанных сообщений: ${count}">${count > 99 ? '99+' : count}</b>` : '';
 function unreadMessages() {
@@ -83,14 +86,44 @@ function showDiagnostic(jobId) {
 }
 $("modal-close").onclick = closeModal;
 function inline(text) {
-  return esc(text).replace(/@\{([au]):([a-zA-Z0-9._-]+)\}/g, (_m, _kind, id) => `<span class="mention">@${esc(name(id))}</span>`)
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>')
-    .replace(/`([^`\n]+)`/g, "<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>");
+  return String(text).split(/(`+[^`\n]*`+|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/\S+|^\s*>[^\n]*|^ {4}[^\n]*)/gm).map((part) => {
+    if (part.startsWith('`')) return `<code>${esc(part.replace(/^`+|`+$/g, ''))}</code>`;
+    const link = /^\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)$/.exec(part);
+    if (link) return `<a href="${esc(link[2])}">${esc(link[1])}</a>`;
+    if (/^(?:https?:\/\/|\s*>| {4})/.test(part)) return esc(part);
+    return esc(part).replace(/@\{([au]):([a-zA-Z0-9._-]+)\}/g, (_m, kind, id) => {
+      const option = data && mentionOptions().find((o) => o.kind === kind && o.id === id);
+      return option ? `<button type="button" class="mention mention-link" data-mention-kind="${kind}" data-mention-id="${id}" title="Упомянуть в ответе · ${esc(option.sub)}">@${esc(option.title)}</button>` : `<span class="mention">@${esc(name(id))}</span>`;
+    }).replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  }).join('').replace(/\n/g, '<br>');
 }
 function markdown(text) {
-  return String(text).split(/(```[\s\S]*?```)/g).map((part) => part.startsWith("```") ? `<pre><code>${esc(part.replace(/^```[^\n]*\n?/, "").replace(/```$/, ""))}</code></pre>` : part.split(/\n\n/).filter(Boolean).map((p) => `<p>${inline(p)}</p>`).join("")).join("");
+  let fence = null, lines = [], result = '';
+  const prose = () => { result += lines.join('\n').split(/\n\n/).filter(Boolean).map((p) => `<p>${inline(p)}</p>`).join(''); lines = []; };
+  const code = () => { result += `<pre><code>${esc(lines.join('\n'))}</code></pre>`; lines = []; };
+  for (const line of String(text).split('\n')) {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length && /^\s*$/.test(line.slice(line.indexOf(marker) + marker.length))) { code(); fence = null; }
+      else lines.push(line);
+    } else if (marker) { prose(); fence = marker; }
+    else lines.push(line);
+  }
+  if (fence) code(); else prose();
+  return result;
 }
 document.addEventListener("click", (event) => {
+  const mention = event.target.closest('[data-mention-id]');
+  if (mention) {
+    const option = mentionOptions().find((o) => o.kind === mention.dataset.mentionKind && o.id === mention.dataset.mentionId);
+    const input = $('composer');
+    if (option && !input.disabled) {
+      const prefix = input.selectionStart && !/\s$/.test(input.value.slice(0, input.selectionStart)) ? ' ' : '';
+      input.setRangeText(`${prefix}${option.insert} `, input.selectionStart, input.selectionEnd, 'end');
+      drafts.set(draftKey(), input.value); input.focus();
+    }
+    return;
+  }
   const link = event.target.closest("a[href]");
   if (link) { event.preventDefault(); void window.hub.openLink(link.getAttribute("href")).catch((e) => toast(errorText(e))); }
 });
@@ -150,7 +183,7 @@ function navigate(space, thread, channel) {
   channelId = thread ? channelOf(data?.threads.find((t) => t.id === thread)) : channel ?? (space ? defaultChannel(space) : null);
   renderKey = ""; draftRequest = null;
   $("composer").value = drafts.get(draftKey()) ?? ""; $("send-error").textContent = "";
-  $("mention-picker").classList.add("hidden");
+  hideMentions();
   if (data) { renderSidebar(); renderTopics(); renderChat(); }
 }
 function renderTopics() {
@@ -266,6 +299,11 @@ function renderChat() {
   if (!archived && approval && !jobs.length) $('job-status').textContent = `${name(approval.agent)} ожидает разрешения владельца. Модель пока не запускается.`;
   document.querySelector(".composer-hint").innerHTML = thread ? "@агент — продолжить разбор · без @ — добавить контекст · @сотрудник — уведомить <span>⌘ / Ctrl + Enter</span>" : "@сотрудник — уведомить · @агент — создать тред · без @ — обычный чат <span>⌘ / Ctrl + Enter</span>";
   for (const id of ["send", "composer", "mode", "mention-button", "new-thread", "stop", "resolve"]) $(id).disabled = archived || !space || !appState.connected;
+  const sending = sendingIn();
+  $('send').disabled ||= sending;
+  $('send').textContent = sending ? 'Отправляется…' : 'Отправить ↑';
+  $('send').setAttribute('aria-busy', String(sending));
+  $('new-thread').disabled ||= sendingIn(spaceId, channelId, null);
   $("follow-thread").classList.toggle("hidden", !thread || !channelSupport);
   const following = data.threadSubscriptions?.some((f) => f.thread === threadId && f.following) ?? false;
   $("follow-thread").textContent = following ? "✓ Вы подписаны на тред" : "Подписаться на тред";
@@ -288,7 +326,10 @@ function renderChat() {
   }).join("") || `<div class="empty"><div class="symbol">${space ? "↗" : "✳"}</div><h3>${space ? "Начните с вопроса" : "Команда начинается со спейса"}</h3><p>${space ? "Напишите коллеге или вызовите агента через @. Он увидит историю этого треда и сможет подключить другого агента." : "Создайте пространство, добавьте коллег и подключите своих агентов. Никаких заданных ролей."}</p></div>`;
   $("messages").querySelectorAll("[data-open-thread]").forEach((button) => button.onclick = () => navigate(spaceId, button.dataset.openThread));
   $("messages").querySelectorAll("[data-diagnostic]").forEach((button) => button.onclick = () => showDiagnostic(button.dataset.diagnostic));
-  $("messages").querySelectorAll("[data-retry]").forEach((button) => button.onclick = () => { const pending = outbox.get(button.dataset.retry); if (pending) void deliverPost(pending); });
+  $("messages").querySelectorAll("[data-retry]").forEach((button) => {
+    button.disabled = sending || archived || !appState.connected;
+    button.onclick = () => { const pending = outbox.get(button.dataset.retry); if (pending) void deliverPost(pending); };
+  });
   const contextJobs = data.jobs.filter((j) => j.thread === threadId && j.contextStats);
   if (thread && (thread.memory || contextJobs.length)) {
     const panel = document.createElement("details"); panel.className = "context-memory";
@@ -321,35 +362,77 @@ function mentionOptions() {
     ...data.agents.filter((a) => members.includes(a.owner) && a.enabled).map((a) => ({ id: a.id, kind: "a", title: a.name, insert: `@«${name(a.owner)} / ${a.name}»`, sub: `${name(a.owner)} · ${a.executor} · ${a.ready ? "готов" : "не в сети"}` })),
   ];
 }
+function hideMentions() {
+  $('mention-picker').classList.add('hidden');
+  $('composer').setAttribute('aria-expanded', 'false'); $('composer').removeAttribute('aria-activedescendant');
+  mentionStart = mentionEnd = null; mentionIndex = -1; visibleMentions = [];
+}
+function highlightMention(index) {
+  mentionIndex = visibleMentions.length ? (index + visibleMentions.length) % visibleMentions.length : -1;
+  $('mention-picker').querySelectorAll('[data-index]').forEach((button, i) => {
+    button.classList.toggle('active', i === mentionIndex); button.setAttribute('aria-selected', String(i === mentionIndex));
+    if (i === mentionIndex) { $('composer').setAttribute('aria-activedescendant', button.id); button.scrollIntoView({ block: 'nearest' }); }
+  });
+  if (mentionIndex < 0) $('composer').removeAttribute('aria-activedescendant');
+}
+function chooseMention(index) {
+  const option = visibleMentions[index], input = $('composer');
+  if (option && mentionStart !== null && mentionEnd !== null && !input.disabled && mentionOptions().some((o) => o.kind === option.kind && o.id === option.id)) {
+    input.setRangeText(`${option.insert} `, mentionStart, mentionEnd, 'end');
+    drafts.set(draftKey(), input.value);
+  }
+  hideMentions(); input.focus();
+}
 function showMentions(forced = false) {
-  if (!data || !spaceId) return;
+  if (!data || !spaceId || $('composer').disabled) { hideMentions(); return; }
   const before = $("composer").value.slice(0, $("composer").selectionStart);
   const match = /(?:^|\s)@([^@«\n]*)$/.exec(before);
-  if (!match && !forced) { $("mention-picker").classList.add("hidden"); mentionStart = null; return; }
+  if (!match && !forced) { hideMentions(); return; }
   const query = forced ? "" : match[1].toLowerCase();
   mentionStart = match ? before.lastIndexOf("@") : $("composer").selectionStart;
-  const options = mentionOptions().filter((o) => `${o.title} ${o.sub}`.toLowerCase().includes(query));
-  $("mention-picker").innerHTML = options.map((o, index) => `<button type="button" class="mention-option" data-index="${index}"><span class="avatar">${o.kind === "a" ? "↗" : esc(initials(o.title))}</span><span>${esc(o.title)}<small>${esc(o.sub)}</small></span></button>`).join("") || '<div class="hint">Нет подходящих участников. Добавьте коллегу в спейс.</div>';
+  mentionEnd = $('composer').selectionEnd;
+  visibleMentions = mentionOptions().filter((o) => `${o.title} ${o.sub}`.toLowerCase().includes(query));
+  $("mention-picker").innerHTML = visibleMentions.map((o, index) => `<button type="button" role="option" tabindex="-1" id="mention-option-${index}" class="mention-option" data-index="${index}"><span class="avatar">${o.kind === "a" ? "↗" : esc(initials(o.title))}</span><span>${esc(o.title)}<small>${esc(o.sub)}</small></span></button>`).join("") || '<div class="hint">Нет подходящих участников. Добавьте коллегу в спейс.</div>';
   $("mention-picker").classList.remove("hidden");
-  $("mention-picker").querySelectorAll("button").forEach((button) => button.onclick = () => {
-    const option = options[Number(button.dataset.index)]; const input = $("composer");
-    const start = mentionStart ?? input.selectionStart;
-    input.setRangeText(`${option.insert} `, start, input.selectionStart, "end");
-    $("mention-picker").classList.add("hidden"); input.focus();
+  $('composer').setAttribute('aria-expanded', 'true'); highlightMention(0);
+  $("mention-picker").querySelectorAll("button").forEach((button) => {
+    button.onpointerdown = (event) => event.preventDefault();
+    button.onpointermove = () => highlightMention(Number(button.dataset.index));
+    button.onclick = () => chooseMention(Number(button.dataset.index));
   });
 }
 function encodeMentions(text) { for (const option of mentionOptions()) text = text.split(option.insert).join(`@{${option.kind}:${option.id}}`); return text; }
 $("composer").addEventListener("input", () => showMentions());
-$("composer").addEventListener("keydown", (event) => { if (event.key === "Escape") $("mention-picker").classList.add("hidden"); if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); $("composer-form").requestSubmit(); } });
+$('composer').setAttribute('role', 'combobox');
+$('composer').setAttribute('aria-autocomplete', 'list'); $('composer').setAttribute('aria-controls', 'mention-picker'); $('composer').setAttribute('aria-expanded', 'false');
+$('mention-picker').setAttribute('role', 'listbox'); $('mention-picker').setAttribute('aria-label', 'Адресаты');
+$('composer').addEventListener('blur', hideMentions);
+$('composer').addEventListener('click', () => showMentions());
+document.addEventListener('pointerdown', (event) => {
+  if (!event.target.closest('#composer, #mention-picker, #mention-button')) hideMentions();
+});
+$("composer").addEventListener("keydown", (event) => {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (!$('mention-picker').classList.contains('hidden')) {
+    if (['ArrowDown', 'ArrowUp'].includes(event.key) && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault(); highlightMention(mentionIndex + (event.key === 'ArrowDown' ? 1 : -1)); return;
+    }
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); chooseMention(mentionIndex); return; }
+    if (event.key === 'Escape') { event.preventDefault(); hideMentions(); return; }
+    if (['Tab', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) hideMentions();
+  }
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); $("composer-form").requestSubmit(); }
+});
 $("mention-button").onclick = () => { $("composer").focus(); showMentions(true); };
 function queuePost(request) {
+  if (sendingIn(request.space, channelId, request.thread ?? null)) return;
   const pending = { id: crypto.randomUUID(), author: data.me.id, hub: appState.settings.url, request, channel: channelId,
     createdAt: Date.now(), state: "queued", error: "", result: null };
   outbox.set(pending.id, pending);
   void deliverPost(pending);
 }
 async function deliverPost(pending) {
-  if (pending.state === "sending") return;
+  if (pending.state === "sending" || sendingIn(pending.request.space, pending.channel, pending.request.thread ?? null)) return;
   pending.state = "sending"; pending.error = ""; renderChat();
   $("messages").scrollTop = $("messages").scrollHeight;
   try {
@@ -371,10 +454,11 @@ async function deliverPost(pending) {
 }
 $("composer-form").onsubmit = (event) => {
   event.preventDefault();
+  if (sendingIn()) return;
   const content = encodeMentions($("composer").value.trim()); if (!content) return;
   if (!spaceId || !appState.connected || currentChannel()?.archived) { $("send-error").textContent = "Нет подключения к хабу или канал в архиве. Текст сохранён в поле ввода."; return; }
   const request = { space: spaceId, ...(channelSupport ? { channel: channelId } : {}), thread: threadId, content, mode: $("mode").value };
-  $("composer").value = ""; drafts.delete(draftKey()); $("send-error").textContent = ""; $("mention-picker").classList.add("hidden");
+  $("composer").value = ""; drafts.delete(draftKey()); $("send-error").textContent = ""; hideMentions();
   queuePost(request); $("composer").focus();
 };
 $("general").onclick = () => navigate(spaceId, null, channelId);
@@ -383,9 +467,11 @@ $("stop").onclick = () => void safely(() => window.hub.call("thread-state", { th
 $("resolve").onclick = () => void safely(() => window.hub.call("thread-state", { thread: threadId, status: currentThread()?.status === "resolved" ? "open" : "resolved" }), "send-error");
 $("new-thread").onclick = () => {
   if (!spaceId) return toast("Сначала создайте спейс");
+  if (sendingIn(spaceId, channelId, null)) return toast('Дождитесь подтверждения отправки в этот канал.');
   if (currentChannel()?.archived) return toast("Сначала восстановите канал из архива");
   openModal("Новый тред", '<form id="thread-form"><label>Тема<input id="thread-title" required maxlength="160" placeholder="Например: контракт новой геймификации"></label><label>С чего начнём?<textarea id="thread-message" rows="5" required placeholder="Опишите вопрос, добавьте ссылки на Jira, Confluence или PR"></textarea></label><p class="hint">После создания вызовите нужного агента через @ в строке сообщения.</p><div class="modal-actions"><button class="primary">Создать тред</button></div></form>');
   $("thread-form").onsubmit = (e) => { e.preventDefault();
+    if (sendingIn(spaceId, channelId, null)) { $('modal-error').textContent = 'Дождитесь подтверждения предыдущей отправки. Текст сохранён.'; return; }
     if (!appState.connected || currentChannel()?.archived) { $("modal-error").textContent = "Нет подключения или канал в архиве. Текст не отправлен."; return; }
     const request = { space: spaceId, ...(channelSupport ? { channel: channelId } : {}), title: $("thread-title").value, content: $("thread-message").value, newThread: true };
     closeModal(); navigate(spaceId, null, channelId); queuePost(request);

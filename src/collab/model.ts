@@ -91,6 +91,4 @@ export function field(value: unknown, label: string, max = 200): string {
   requireValue(typeof value === "string" && value.trim().length > 0 && value.length <= max, `${label}: требуется текст (до ${max} символов)`);
   return value.trim();
 }
-export function mentions(content: string): { kind: "a" | "u"; id: string }[] {
-  return [...content.matchAll(/@\{([au]):([a-zA-Z0-9._-]+)\}/g)].map((m) => ({ kind: m[1] as "a" | "u", id: m[2]! }));
-}
+export { mentions } from "./addressing.js";

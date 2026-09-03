@@ -1,4 +1,15 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.7.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.8.
+
+New in 0.2.8:
+
+- Agent answers visibly tag their recipient: the requesting human for a final answer, the selected human for a decision, or the next agent for a handoff. Prompts include exact mention tokens; the coordinator adds missing recipient tags from legacy routing directives.
+- A single agent mention in a reply can now hand off without a separate ROUTE line, in the same thread with the existing context, approval gate and 12-answer cap. Repeated delivery/mentions do not create duplicate jobs. Human mentions notify people, never invoke their agents.
+- Conflicting routes, multiple peers, self-calls and unavailable recipients stop with a visible error. Code examples, quotes and URLs do not invoke agents, including in human messages. Plain display names are not guessed.
+- Reply, mention, follower and completion notifications are deduplicated per message and employee; decision requests keep a distinct actionable title. Existing mute/read/OS preferences still apply.
+- Click a mention to add that person or agent to your reply draft; clicking never sends a message or starts a model. Old history is neither rewritten nor replayed.
+- The recipient picker supports Up/Down (with highlighted selection), Enter to insert and close, Escape/Tab/outside click to dismiss. Enter while the picker is open never sends the message, including Ctrl/Cmd+Enter. IME composition is respected.
+- While a message awaits confirmation, the send button reads “Sending…” and blocks button/form/hotkey re-entry in that conversation. You can still type the next draft or use another conversation. Success/failure unlocks sending; retry uses the same lock and immutable request ID.
+- Deploy the coordinator for new routing/notifications; update desktops for clickable mention chips. No new storage migration or credential setup is needed.
 
 New in 0.2.7:
 

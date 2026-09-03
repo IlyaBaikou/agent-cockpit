@@ -36,6 +36,68 @@ function setup() {
 }
 
 describe("employee-owned agents and shared spaces", () => {
+  it("tags and notifies human recipients once, even if they also follow the thread", async () => {
+    const h = setup(), a = await h.agent("A"), space = await h.space();
+    const { thread } = await h.post(space, a); const first = await h.claim(a);
+    expect(first.prompt).toContain("mention @{u:Bob}"); expect(first.prompt).toContain(`mention @{a:${a.id}}`);
+    await h.call("thread-subscription", { thread: thread.id, following: true }, bob);
+    const before = (await h.call<Snapshot>("sync", {}, bob)).sequence;
+    await h.complete(a, first.job, "Approve?\nROUTE: human:Bob");
+    await h.complete(a, first.job, "Approve?\nROUTE: human:Bob");
+    const s = await h.call<Snapshot>("sync", {}, bob), reply = s.messages.find((m) => m.kind === "agent")!;
+    expect(reply.content).toBe("@{u:Bob}\n\nApprove?");
+    expect(s.notices.filter((n) => n.seq > before)).toEqual([expect.objectContaining({ employee: "Bob", event: reply.id, title: "Нужно ваше решение" })]);
+    await h.post(space, a, { thread: thread.id }); const next = await h.claim(a);
+    const previous = (await h.call<Snapshot>("sync")).sequence;
+    await h.complete(a, next.job);
+    const final = await h.call<Snapshot>("sync");
+    expect(final.messages.filter((m) => m.kind === "agent").at(-1)?.content).toBe("@{u:Alice}\n\nAnswer");
+    expect(final.notices.filter((n) => n.seq > previous)).toHaveLength(1);
+  });
+  it("runs a mention-only peer handoff once after consent, in the same thread, with shared context", async () => {
+    const h = setup(), a = await h.agent("A"), b = await h.agent("B", bob), space = await h.space();
+    const { thread } = await h.post(space, a); const first = await h.claim(a);
+    await h.complete(a, first.job, `@{a:${b.id}} Review the contract?`);
+    await h.complete(a, first.job, `@{a:${b.id}} Review the contract?`);
+    expect((await h.claim(b, bob)).job).toBeNull();
+    const waiting = await h.call<Snapshot>("sync", {}, bob);
+    expect(waiting.jobs).toHaveLength(1); expect(waiting.participations).toHaveLength(1);
+    expect(waiting.notices.filter((n) => n.title === "Разрешить участие агента?")).toHaveLength(1);
+    await h.approve(b, bob); const second = await h.claim(b, bob);
+    expect(second.job.thread).toBe(thread.id); expect(second.job.mode).toBe("read");
+    expect(second.prompt).toContain("Review the contract?");
+    await h.complete(b, second.job, `@{a:${a.id}} Please clarify the field.`, bob);
+    expect((await h.claim(a)).job).toBeNull(); await h.approve(a);
+    const third = await h.claim(a); expect(third.prompt).toContain("Please clarify the field.");
+    await h.complete(a, third.job, "Clarified\nROUTE: done");
+    expect((await h.call<Snapshot>("sync")).jobs).toHaveLength(3);
+  });
+  it("does not launch a mention-only peer after human intervention or conflicting recipients", async () => {
+    const h = setup(), a = await h.agent("A"), b = await h.agent("B"), space = await h.space();
+    const { thread } = await h.post(space, a); const { job } = await h.claim(a);
+    await h.post(space, undefined, { thread: thread.id, content: "Wait, changed requirements" });
+    await h.complete(a, job, `@{a:${b.id}} Review?`);
+    expect((await h.call<Snapshot>("sync")).participations).toHaveLength(0);
+    await h.post(space, a, { thread: thread.id }); const next = await h.claim(a);
+    await h.complete(a, next.job, `@{a:${b.id}} Review?\nROUTE: done`);
+    const s = await h.call<Snapshot>("sync");
+    expect(s.threads[0]?.status).toBe("error"); expect(s.jobs).toHaveLength(2);
+    expect(s.messages.at(-1)?.content).toContain("противоречат");
+  });
+  it("applies the chain cap to mention-only ping-pong and never calls models for quoted human posts", async () => {
+    const h = setup(), a = await h.agent("A"), b = await h.agent("B"), space = await h.space();
+    await h.post(space, undefined, { content: `Example: \`@{a:${a.id}}\`\n\n> @{a:${b.id}}` });
+    expect((await h.call<Snapshot>("sync")).jobs).toHaveLength(0);
+    await h.post(space, a);
+    for (let i = 0; i < 12; i++) {
+      const active = i % 2 ? b : a, next = i % 2 ? a : b;
+      await h.approve(active); const { job } = await h.claim(active);
+      await h.complete(active, job, `@{a:${next.id}} Question ${i}`);
+    }
+    const s = await h.call<Snapshot>("sync");
+    expect(s.jobs).toHaveLength(12); expect(s.threads[0]?.status).toBe("waiting");
+    expect(s.messages.at(-1)?.content).toContain("лимит 12");
+  });
   it("does not invoke models for ordinary chat or human mentions", async () => {
     const h = setup(), space = await h.space(); await h.agent("Reviewer");
     await h.post(space); await h.call("post", { space: space.id, content: "Question for @{u:Bob}" });

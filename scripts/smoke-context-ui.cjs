@@ -15,6 +15,66 @@ app.whenReady().then(async () => {
     window.webContents.on("render-process-gone", (_event, details) => { console.error("Renderer exited", details.reason); app.exit(1); });
     await window.loadFile(resolve(__dirname, "../ui/hub.html"));
     console.log("CONTEXT_UI_PAGE_LOADED");
+    const mentions = await window.webContents.executeJavaScript(`(() => {
+      const check = (v, why) => { if (!v) throw new Error(why); };
+      navigate('demo-space', 'demo-thread');
+      const fixture = document.createElement('div'); document.body.append(fixture);
+      const tick = String.fromCharCode(96);
+      fixture.innerHTML = markdown('@{u:peer} @{a:b} ' + tick + '@{a:a}' + tick + '\\n\\n> @{a:a}\\n\\n[Example @{a:a}](https://example.test)');
+      check(fixture.querySelectorAll('[data-mention-id]').length === 2, 'Only real mentions should be interactive, not code/quotes/links');
+      const input = document.getElementById('composer'); input.value = 'Ответ: '; input.setSelectionRange(input.value.length, input.value.length);
+      const jobs = data.jobs.length;
+      fixture.querySelector('[data-mention-kind="u"]').click();
+      check(input.value === 'Ответ: @«Sam» ', 'Human chip inserts a readable recipient');
+      fixture.querySelector('[data-mention-kind="a"]').click();
+      check(encodeMentions(input.value) === 'Ответ: @{u:peer} @{a:b} ', 'Agent chip retains exact identity for dispatch');
+      check(data.jobs.length === jobs, 'Clicking a chip must not send or launch an agent');
+      for (const example of ['~~~\\n@{a:a}\\n~~~', tick.repeat(3) + '\\n@{a:a}', '~~~~\\n~~~\\n@{a:a}\\n~~~~']) {
+        fixture.innerHTML = markdown(example);
+        check(!fixture.querySelector('[data-mention-id]') && fixture.querySelector('pre'), 'Fenced examples must never look like live mention buttons');
+      }
+      fixture.remove(); input.value = ''; drafts.delete(draftKey());
+      return { humans: true, agents: true, examplesIgnored: true, noAutomaticSend: true };
+    })()`);
+    console.log(JSON.stringify({ mentions }));
+    const mentionKeyboard = await window.webContents.executeJavaScript(`(async () => {
+      const check = (v, why) => { if (!v) throw new Error(why); };
+      navigate('demo-space', 'demo-thread');
+      const input = document.getElementById('composer'), picker = document.getElementById('mention-picker');
+      const count = (await window.hub.testCalls()).filter(c => c.op === 'post').length;
+      const type = (value, caret = value.length) => { input.value = value; input.focus(); input.setSelectionRange(caret, caret); input.dispatchEvent(new Event('input', { bubbles: true })); };
+      const key = (value, extra = {}) => { const event = new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true, ...extra }); input.dispatchEvent(event); return event; };
+      type('@');
+      check(input.getAttribute('aria-expanded') === 'true' && picker.querySelector('[aria-selected="true"]').dataset.index === '0', 'First mention should be highlighted');
+      check(key('ArrowDown').defaultPrevented && picker.querySelector('.active').dataset.index === '1', 'Down selects next recipient without moving caret');
+      key('ArrowUp'); check(picker.querySelector('.active').dataset.index === '0', 'Up selects previous recipient');
+      key('ArrowUp'); check(picker.querySelector('.active').dataset.index === '3', 'Up wraps to final recipient');
+      key('Enter');
+      check(input.value === '@«Sam / Frontend Claude» ' && picker.classList.contains('hidden') && !input.hasAttribute('aria-activedescendant'), 'Enter inserts recipient and closes picker immediately');
+      check(encodeMentions(input.value) === '@{a:b} ', 'Selected peer identity preserved');
+      type('До @fro после', 7); key('Enter', { ctrlKey: true });
+      check(input.value === 'До @«Sam / Frontend Claude»  после', 'Filtered keyboard choice must preserve suffix, even with Ctrl+Enter');
+      type('@sam'); check(picker.querySelectorAll('[role="option"]').length === 2 && picker.querySelector('.active').dataset.index === '0', 'Filtering resets active index');
+      key('Escape'); check(picker.classList.contains('hidden') && input.value === '@sam', 'Escape closes without changing draft');
+      type('@no-such-recipient'); key('ArrowDown'); key('Enter');
+      check(input.value === '@no-such-recipient' && picker.classList.contains('hidden'), 'Empty results must not insert or send');
+      type('@'); key('Enter', { isComposing: true }); check(!picker.classList.contains('hidden') && input.value === '@', 'IME composition must not select or send');
+      key('Tab'); check(picker.classList.contains('hidden'), 'Tab closes picker');
+      type('@'); picker.querySelector('[data-index="1"]').click();
+      check(input.value === '@«Sam» ' && picker.classList.contains('hidden'), 'Mouse choice still closes picker');
+      type('@'); document.getElementById('chat-title').dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      check(picker.classList.contains('hidden'), 'Outside click closes picker');
+      check((await window.hub.testCalls()).filter(c => c.op === 'post').length === count, 'Mention navigation never sends a message');
+      input.value = ''; drafts.delete(draftKey());
+      return { arrows: true, wrap: true, enter: true, escape: true, filtered: true, mouse: true, composition: true, noSend: true };
+    })()`);
+    console.log('MENTION_KEYBOARD_UI_SMOKE_OK', mentionKeyboard);
+    if (process.argv[2]) {
+      await window.webContents.executeJavaScript(`(() => { const input = document.getElementById('composer'); input.value = '@'; input.focus(); input.setSelectionRange(1, 1); showMentions(); highlightMention(1); })()`);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      writeFileSync(resolve(process.argv[2]).replace(/\.png$/, '-mentions.png'), (await window.webContents.capturePage()).toPNG());
+      await window.webContents.executeJavaScript(`(() => { hideMentions(); document.getElementById('composer').value = ''; drafts.delete(draftKey()); })()`);
+    }
     const cards = await window.webContents.executeJavaScript(`(() => {
       const saved = structuredClone(data);
       const check = (condition, detail) => { if (!condition) throw new Error(detail); };
@@ -184,8 +244,15 @@ app.whenReady().then(async () => {
       composer.value = 'Мгновенное сообщение'; document.getElementById('composer-form').requestSubmit();
       check(document.querySelector('.delivery.sending') && document.getElementById('messages').innerText.includes('Мгновенное сообщение'), 'Pending message must appear before network confirmation');
       check(composer.value === '', 'Accepted local send must immediately free the composer');
+      const send = document.getElementById('send');
+      check(send.disabled && send.textContent === 'Отправляется…' && send.getAttribute('aria-busy') === 'true' && !composer.disabled, 'Pending send must lock button, not the next draft');
       composer.value = 'Следующий черновик не потерять';
+      send.click();
+      document.getElementById('composer-form').requestSubmit();
+      for (const modifier of ['ctrlKey', 'metaKey']) composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', [modifier]: true, bubbles: true, cancelable: true }));
+      check(composer.value === 'Следующий черновик не потерять' && !(await window.hub.testCalls()).some(c => c.op === 'post' && c.input.content === composer.value), 'Button/form/hotkey re-entry must preserve draft and prevent duplicate sends');
       await wait(() => !document.querySelector('.delivery.sending'));
+      check(!send.disabled && send.textContent === 'Отправить ↑' && send.getAttribute('aria-busy') === 'false', 'Acknowledgement restores send button');
       check(composer.value === 'Следующий черновик не потерять', 'Server receipt must not clear newly typed text');
       check([...document.querySelectorAll('.message-body')].filter(m => m.innerText.includes('Мгновенное сообщение')).length === 1, 'Receipt duplicated message');
       check(document.querySelector('.delivery.sent'), 'Acknowledgement must be visible');
@@ -195,7 +262,10 @@ app.whenReady().then(async () => {
       await wait(() => document.querySelector('[data-retry]'));
       const failed = [...outbox.values()].find(p => p.request.content === 'Потерянное подтверждение');
       check(failed?.state === 'failed', 'Failure must remain in the originating chat');
+      check(!send.disabled && send.textContent === 'Отправить ↑', 'Failure unlocks send button');
+      await window.hub.testConfigurePost({ delayMs: 120 });
       document.querySelector('[data-retry]').click();
+      check(send.disabled && send.getAttribute('aria-busy') === 'true', 'Retry also locks composer send');
       await wait(() => !document.querySelector('[data-retry]') && !document.querySelector('.delivery.sending'));
       const attempts = (await window.hub.testCalls()).filter(c => c.op === 'post' && c.input.content === 'Потерянное подтверждение');
       check(attempts.length === 2 && attempts[0].input.requestId === attempts[1].input.requestId, 'Retry must keep immutable request ID');
@@ -203,6 +273,9 @@ app.whenReady().then(async () => {
       await window.hub.testConfigurePost({ delayMs: 100, fail: true });
       composer.value = 'Ошибка при смене канала'; document.getElementById('composer-form').requestSubmit();
       navigate('demo-space', 'demo-thread', 'general:demo-space'); composer.value = 'Черновик другого треда';
+      check(!send.disabled && send.textContent === 'Отправить ↑', 'One conversation must not block a different thread');
+      navigate('demo-space', null, 'gamification'); check(send.disabled, 'Returning to in-flight conversation restores send lock');
+      navigate('demo-space', 'demo-thread', 'general:demo-space');
       await wait(() => [...outbox.values()].some(p => p.request.content === 'Ошибка при смене канала' && p.state === 'failed'));
       check(threadId === 'demo-thread' && composer.value === 'Черновик другого треда', 'Late failure must not navigate or replace another draft');
       check(!document.getElementById('messages').innerText.includes('Ошибка при смене канала'), 'Pending message leaked to another channel');
