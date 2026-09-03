@@ -5,11 +5,15 @@ const labels = { open: "Открыт", working: "Агенты работают",
 let appState, data, spaceId = null, channelId = null, threadId = null, renderKey = "", mentionStart = null;
 let channelSupport = false;
 const outbox = new Map();
+const decisionsInFlight = new Set();
+const readsInFlight = new Map();
 let invitationView = null;
 const drafts = new Map();
 const name = (id) => data?.agents.find((a) => a.id === id)?.name ?? data?.employees.find((e) => e.id === id)?.name ?? "Agent Hub";
 const initials = (s) => s.split(/[\s/-]+/).slice(0, 2).map((p) => p[0] ?? "").join("").toUpperCase();
 const status = (s) => `<span class="status ${esc(s)}">${labels[s] ?? esc(s)}</span>`;
+const threadStatus = (t) => data.participations?.some((p) => p.thread === t.id && p.status === 'pending' && p.request)
+  ? '<span class="status waiting">Ожидает разрешения</span>' : status(t.status);
 const currentSpace = () => data?.spaces.find((s) => s.id === spaceId);
 const currentThread = () => data?.threads.find((t) => t.id === threadId);
 const defaultChannel = (space) => `general:${space}`;
@@ -18,6 +22,42 @@ const channelsIn = (space) => data?.channels?.filter((c) => c.space === space) ?
 const currentChannel = () => channelsIn(spaceId).find((c) => c.id === channelId);
 const draftKey = () => `${spaceId}/${channelId}/${threadId}`;
 const time = (value) => new Date(value).toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" });
+const badge = (count) => count ? `<b class="unread-badge" aria-label="Непрочитанных сообщений: ${count}">${count > 99 ? '99+' : count}</b>` : '';
+function unreadMessages() {
+  if (data?.readVersion !== 1) return [];
+  return data.messages.filter((m) => m.kind !== 'system' && !(m.kind === 'human' && m.author === data.me.id)
+    && m.seq > Math.max(data.readBaseline ?? 0, data.readPositions?.find((p) => p.channel === channelOf(m) && p.thread === m.thread)?.through ?? 0));
+}
+function markCurrentRead() {
+  if (!appState?.connected || data?.readVersion !== 1 || document.visibilityState !== 'visible' || !document.hasFocus() || $('modal').open) return;
+  const box = $('messages');
+  if (box.scrollHeight - box.scrollTop - box.clientHeight > 30) return;
+  const latest = data.messages.filter((m) => m.space === spaceId && channelOf(m) === channelId && m.thread === threadId && m.seq).at(-1);
+  const noticeThrough = data.sequence;
+  const unseenNotices = data.notices.some((n) => !n.read && n.space === spaceId && channelOf(n) === channelId && n.thread === threadId);
+  const key = `${data.me.id}/${channelId}/${threadId}`, before = Math.max(data.readBaseline ?? 0,
+    data.readPositions?.find((p) => p.channel === channelId && p.thread === threadId)?.through ?? 0);
+  const stamp = `${latest?.seq ?? 0}/${noticeThrough}`;
+  if (((latest?.seq ?? 0) <= before && !unseenNotices) || readsInFlight.has(key) || !channelId) return;
+  const employee = data.me.id, account = appState.settings.url, channel = channelId, thread = threadId;
+  readsInFlight.set(key, stamp);
+  void window.hub.call('read', { channel, thread, ...(latest ? { through: latest.id } : {}), noticeThrough }).then(() => {
+    if (data.me.id !== employee || appState.settings.url !== account) return;
+    if (latest) {
+      const positions = data.readPositions ??= [], p = positions.find((p) => p.channel === channel && p.thread === thread);
+      if (p) p.through = Math.max(p.through, latest.seq); else positions.push({ employee, channel, thread, through: latest.seq });
+    }
+    for (const n of data.notices) if (n.seq <= noticeThrough && channelOf(n) === channel && n.thread === thread) n.read = true;
+    renderSidebar(); renderTopics();
+    // Channel cards carry badges too. Re-render without changing the scroll position.
+    renderChat();
+  }).catch(() => {}).finally(() => { if (readsInFlight.get(key) === stamp) readsInFlight.delete(key); });
+}
+let readFrame = 0;
+function scheduleRead() { if (!readFrame) readFrame = requestAnimationFrame(() => { readFrame = 0; markCurrentRead(); }); }
+window.addEventListener('focus', scheduleRead);
+document.addEventListener('visibilitychange', scheduleRead);
+$('messages').addEventListener('scroll', scheduleRead, { passive: true });
 const friendly = (text) => String(text).replace(/@\{([au]):([a-zA-Z0-9._-]+)\}/g, (_m, _kind, id) => `@${name(id)}`);
 function toast(message) { $("toast").textContent = message; $("toast").classList.remove("hidden"); setTimeout(() => $("toast").classList.add("hidden"), 6000); }
 function errorText(error) { return String(error.message ?? error).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""); }
@@ -61,7 +101,7 @@ document.addEventListener("change", (event) => {
   void window.hub.preferences({ theme: selected }).catch((error) => { applyTheme(before); toast(errorText(error)); });
 });
 function receive(value) {
-  if (data?.me.id && (value.snapshot?.me.id !== data.me.id || value.settings.url !== appState.settings.url)) { outbox.clear(); drafts.clear(); }
+  if (data?.me.id && (value.snapshot?.me.id !== data.me.id || value.settings.url !== appState.settings.url)) { outbox.clear(); drafts.clear(); readsInFlight.clear(); }
   appState = value; data = value.snapshot;
   if (data) {
     for (const [id, pending] of outbox) {
@@ -81,6 +121,7 @@ function receive(value) {
   $("connection-dot").classList.toggle("ready", value.connected); $("connection-text").textContent = value.connected ? (value.settings.local ? "Локальный хаб" : "Хаб подключён") : "Связь прервана";
   $("connection-banner").classList.toggle("hidden", !value.error); $("connection-banner").textContent = value.error ? `${value.error}. Восстанавливаем подключение…` : "";
   renderSidebar(); renderTopics(); renderChat();
+  if ($('modal').open && $('inbox-list')) renderInbox();
   if ($("modal").open && $("group-invite-form")) {
     const key = JSON.stringify(data.groupInvitations);
     if (invitationView !== key) {
@@ -93,14 +134,15 @@ function receive(value) {
   }
 }
 function renderSidebar() {
-  $("spaces").innerHTML = data.spaces.map((s) => `<button class="space-button ${s.id === spaceId ? "active" : ""}" data-space="${s.id}"><span>#</span>${esc(s.name)}</button>`).join("");
+  const unread = unreadMessages();
+  $("spaces").innerHTML = data.spaces.map((s) => `<button class="space-button ${s.id === spaceId ? "active" : ""}" data-space="${s.id}"><span>#</span><span class="space-title">${esc(s.name)}</span>${badge(unread.filter((m) => m.space === s.id).length)}</button>`).join("");
   $("spaces").querySelectorAll("[data-space]").forEach((b) => b.onclick = () => navigate(b.dataset.space, null));
   $("my-agents").innerHTML = data.agents.filter((a) => a.owner === data.me.id).map((a) => {
     const busy = data.jobs.some((j) => j.agent === a.id && j.status === "running");
     return `<button class="agent-nav" data-agent="${a.id}"><i class="dot ${busy ? "busy" : a.ready && a.enabled ? "ready" : ""}"></i><span>${esc(a.name)}<small>${a.executor} · ${!a.enabled ? "отключён" : busy ? "работает" : a.ready ? "готов" : "не в сети"}</small></span></button>`;
   }).join("") || '<p class="hint">Подключите первого агента через +</p>';
   $("my-agents").querySelectorAll("[data-agent]").forEach((b) => b.onclick = () => editAgent(b.dataset.agent));
-  $("inbox-count").textContent = data.notices.length || "";
+  $("inbox-count").textContent = data.notices.filter((n) => !n.read).length || "";
 }
 function navigate(space, thread, channel) {
   drafts.set(draftKey(), $("composer").value);
@@ -116,14 +158,16 @@ function renderTopics() {
   $("members").textContent = space ? `${space.members.length} участников · Настроить` : "";
   $("general").classList.toggle("active", !threadId);
   renderChannels();
-  $("threads").innerHTML = data.threads.filter((t) => t.space === spaceId && channelOf(t) === channelId).slice().reverse().map((t) => `<button class="thread-card ${t.id === threadId ? "active" : ""}" data-thread="${t.id}"><strong>${esc(t.title)}</strong><div class="meta">${status(t.status)}<span>${data.messages.filter((m) => m.thread === t.id && m.kind !== "system").length} сообщ.</span></div></button>`).join("");
+  const unread = unreadMessages();
+  $("threads").innerHTML = data.threads.filter((t) => t.space === spaceId && channelOf(t) === channelId).slice().reverse().map((t) => `<button class="thread-card ${t.id === threadId ? "active" : ""}" data-thread="${t.id}"><div class="thread-title"><strong>${esc(t.title)}</strong>${badge(unread.filter((m) => m.thread === t.id).length)}</div><div class="meta">${threadStatus(t)}<span>${data.messages.filter((m) => m.thread === t.id && m.kind !== "system").length} сообщ.</span></div></button>`).join("");
   $("threads").querySelectorAll("[data-thread]").forEach((b) => b.onclick = () => navigate(spaceId, b.dataset.thread));
 }
 function renderChannels() {
   const channels = channelsIn(spaceId), selected = currentChannel();
+  const unread = unreadMessages();
   const render = (archived) => channels.filter((c) => c.archived === archived).map((c) => {
     const muted = data.channelPreferences?.some((p) => p.channel === c.id && p.muted);
-    return `<button class="channel-button ${c.id === channelId ? 'active' : ''}" data-channel="${esc(c.id)}" title="${esc(c.description)}"><span>#</span><strong>${esc(c.name)}</strong>${muted ? '<small>тихо</small>' : ''}${c.archived ? '<small>архив</small>' : ''}</button>`;
+    return `<button class="channel-button ${c.id === channelId ? 'active' : ''}" data-channel="${esc(c.id)}" title="${esc(c.description)}"><span>#</span><strong>${esc(c.name)}</strong>${muted ? '<small>тихо</small>' : ''}${c.archived ? '<small>архив</small>' : ''}${badge(unread.filter((m) => channelOf(m) === c.id).length)}</button>`;
   }).join('');
   $("channels").innerHTML = render(false); $("archived-channels").innerHTML = render(true);
   $("channel-archive").classList.toggle("hidden", !channels.some((c) => c.archived));
@@ -135,7 +179,7 @@ function renderChannels() {
   const muted = data.channelPreferences?.some((p) => p.channel === channelId && p.muted) ?? false;
   $("mute-channel").textContent = muted ? "Уведомления заглушены" : "Уведомления включены";
   $("mute-channel").setAttribute("aria-pressed", String(muted));
-  $("general").textContent = `← Чат # ${selected?.name ?? 'Общий'}`;
+  $("general").innerHTML = `← Чат # ${esc(selected?.name ?? 'Общий')} ${badge(unread.filter((m) => channelOf(m) === channelId && !m.thread).length)}`;
   $("threads-label").textContent = `ТРЕДЫ · ${selected?.name ?? 'Общий'}`;
 }
 function editChannel(existing = false) {
@@ -180,14 +224,31 @@ function generalThreadCards() {
 function renderThreadCard(card) {
   const t = card.thread;
   const preview = friendly(card.root?.content ?? "").replace(/```[\s\S]*?```/g, "[Фрагмент кода]").slice(0, 260);
-  return `<article class="message thread-announcement"><span class="avatar">${esc(initials(name(t.owner)))}</span><div class="message-main"><div class="message-head"><strong>${esc(name(t.owner))}</strong><span class="agent-tag">НАЧАЛ ОБСУЖДЕНИЕ</span><time>${time(card.createdAt)}</time></div><button type="button" class="thread-link-card" data-open-thread="${esc(t.id)}" aria-label="Открыть тред: ${esc(t.title)}. ${esc(labels[t.status] ?? t.status)}. Ответов: ${card.replies}"><span class="thread-link-label">↗ ОБСУЖДЕНИЕ В ТРЕДЕ</span><strong>${esc(t.title)}</strong>${preview ? `<span class="thread-link-preview">${esc(preview)}</span>` : ""}<span class="thread-link-meta">${status(t.status)}<span>Ответов: ${card.replies}</span><span class="thread-link-open">Открыть тред →</span></span></button></div></article>`;
+  return `<article class="message thread-announcement"><span class="avatar">${esc(initials(name(t.owner)))}</span><div class="message-main"><div class="message-head"><strong>${esc(name(t.owner))}</strong><span class="agent-tag">НАЧАЛ ОБСУЖДЕНИЕ</span><time>${time(card.createdAt)}</time></div><button type="button" class="thread-link-card" data-open-thread="${esc(t.id)}" aria-label="Открыть тред: ${esc(t.title)}. ${esc(labels[t.status] ?? t.status)}. Ответов: ${card.replies}"><span class="thread-link-label">↗ ОБСУЖДЕНИЕ В ТРЕДЕ ${badge(unreadMessages().filter((m) => m.thread === t.id).length)}</span><strong>${esc(t.title)}</strong>${preview ? `<span class="thread-link-preview">${esc(preview)}</span>` : ""}<span class="thread-link-meta">${threadStatus(t)}<span>Ответов: ${card.replies}</span><span class="thread-link-open">Открыть тред →</span></span></button></div></article>`;
+}
+function participationHtml(p, thread) {
+  const agent = data.agents.find((a) => a.id === p.agent), owner = agent?.owner === data.me.id;
+  const pending = Boolean(p.request) && ['pending', 'denied'].includes(p.status);
+  const source = data.messages.find((m) => m.id === p.request?.sourceMessage);
+  const disabled = decisionsInFlight.has(p.id) || !appState.connected || currentChannel()?.archived;
+  const button = (action, label, runs) => `<button type="button" class="${action === 'allow' ? 'primary' : 'quiet'}" data-participation="${esc(p.id)}" data-action="${action}" ${runs ? `data-runs="${runs}"` : ''} ${disabled ? 'disabled' : ''}>${label}</button>`;
+  return `<section class="participation-card ${p.status}" aria-label="Участие ${esc(name(p.agent))}"><div class="participation-heading"><strong>${esc(name(p.agent))}</strong><span>${p.status === 'pending' ? 'Ожидает разрешения' : p.status === 'denied' ? 'Участие отклонено' : p.status === 'revoked' ? 'Разрешение отозвано' : `Доступно запусков: ${p.remaining}`}</span></div><p class="hint">Владелец: ${esc(name(agent?.owner))} · По разрешениям использовано: ${p.used}</p>${pending ? `<p>Инициатор: ${esc(name(p.request.requestedBy))}${source?.kind === 'agent' ? ` · Передал: ${esc(name(source.author))}` : ''}</p><blockquote>${esc(friendly(source?.content ?? 'Откройте контекст обсуждения выше.').slice(0, 600))}</blockquote><p class="hint">До подтверждения модель не запускается. Разрешение действует только на этого агента в этом треде, в режиме разбора.</p>` : ''}<div class="participation-actions">${owner && pending ? `${button('allow', 'Один ответ', 1)}${button('allow', p.used ? 'Продолжить ещё на 3 запуска' : 'Разрешить обсуждение · 3 запуска', 3)}${p.status !== 'denied' ? button('deny', 'Отклонить') : ''}` : pending ? `<p class="hint">Решение принимает ${esc(name(agent?.owner))}.</p>` : ''}${owner && p.status === 'allowed' ? button('revoke', 'Отозвать и остановить') : ''}</div>${owner && pending ? '<p class="hint">Лимит резервируется при постановке задания в очередь. Ошибки не возвращают запуск. Один запуск — одна задача, иногда со сжатием контекста; это не лимит токенов.</p>' : ''}</section>`;
+}
+async function decideParticipation(button) {
+  const p = data.participations?.find((p) => p.id === button.dataset.participation), thread = currentThread();
+  if (!p || !thread || decisionsInFlight.has(p.id)) return;
+  const body = { id: p.id, revision: p.revision, threadRevision: thread.revision, action: button.dataset.action, runs: Number(button.dataset.runs), requestId: crypto.randomUUID() };
+  decisionsInFlight.add(p.id); renderChat();
+  try { await window.hub.call('participation', body); }
+  catch (error) { toast(errorText(error)); }
+  finally { decisionsInFlight.delete(p.id); renderChat(); }
 }
 function renderChat() {
   const thread = currentThread(), space = currentSpace(), channel = currentChannel();
   const archived = channel?.archived === true;
   $("chat-title").textContent = thread?.title ?? (channel ? `# ${channel.name}` : "Добро пожаловать в Agent Hub");
   $("chat-eyebrow").textContent = thread ? `${space?.name ?? ""} / # ${channel?.name ?? "Общий"} / ТРЕД` : `${space?.name ?? ""} / КАНАЛ`;
-  $("chat-subtitle").innerHTML = thread ? `${status(thread.status)} &nbsp; Начал ${esc(name(thread.owner))}` : esc(channel?.description || "Обсуждения команды. Один вопрос — один тред.");
+  $("chat-subtitle").innerHTML = thread ? `${threadStatus(thread)} &nbsp; Начал ${esc(name(thread.owner))}` : esc(channel?.description || "Обсуждения команды. Один вопрос — один тред.");
   $("thread-actions").classList.toggle("hidden", !thread);
   $("resolve").textContent = thread?.status === "resolved" ? "↺ Открыть" : "✓ Завершить";
   const pending = [...outbox.values()].filter((p) => p.request.space === spaceId && p.channel === channelId && (p.result?.message?.thread ?? p.request.thread ?? null) === threadId
@@ -198,16 +259,20 @@ function renderChat() {
   const cards = threadId ? [] : generalThreadCards();
   const jobs = data.jobs.filter((j) => j.thread === threadId && ["queued", "running"].includes(j.status));
   const needsPerson = thread && ["waiting", "paused"].includes(thread.status);
+  const participations = data.participations?.filter((p) => p.thread === threadId) ?? [];
+  const approval = participations.find((p) => p.request && p.status === 'pending');
   $("job-status").classList.toggle("hidden", !archived && !jobs.length && !needsPerson);
   $("job-status").textContent = archived ? "Канал в архиве: история доступна для чтения. Восстановите канал в его настройках, чтобы продолжить." : jobs.length ? jobs.map((j) => `${name(j.agent)} ${j.status === "queued" ? "ожидает свободного раннера" : "работает с контекстом треда"} · ${j.mode === "write" ? "изменения" : "разбор"}`).join(" · ") : needsPerson ? "Чтобы продолжить: напишите ответ или уточнение и укажите через @ агента, который должен подхватить разбор." : "";
+  if (!archived && approval && !jobs.length) $('job-status').textContent = `${name(approval.agent)} ожидает разрешения владельца. Модель пока не запускается.`;
   document.querySelector(".composer-hint").innerHTML = thread ? "@агент — продолжить разбор · без @ — добавить контекст · @сотрудник — уведомить <span>⌘ / Ctrl + Enter</span>" : "@сотрудник — уведомить · @агент — создать тред · без @ — обычный чат <span>⌘ / Ctrl + Enter</span>";
   for (const id of ["send", "composer", "mode", "mention-button", "new-thread", "stop", "resolve"]) $(id).disabled = archived || !space || !appState.connected;
   $("follow-thread").classList.toggle("hidden", !thread || !channelSupport);
   const following = data.threadSubscriptions?.some((f) => f.thread === threadId && f.following) ?? false;
   $("follow-thread").textContent = following ? "✓ Вы подписаны на тред" : "Подписаться на тред";
   $("follow-thread").setAttribute("aria-pressed", String(following));
-  const key = JSON.stringify([spaceId, channelId, threadId, messages, cards, thread?.memory, data.employees, data.agents.map((a) => [a.id, a.name, a.owner]), data.jobs.filter((j) => j.thread === threadId).map((j) => [j.id,j.status,Boolean(j.diagnostic)])]);
-  if (key === renderKey) return;
+  const key = JSON.stringify([spaceId, channelId, threadId, messages, cards, thread?.memory, thread?.revision, participations, [...decisionsInFlight], data.readPositions, data.employees, data.agents.map((a) => [a.id, a.name, a.owner]), data.jobs.filter((j) => j.thread === threadId).map((j) => [j.id,j.status,Boolean(j.diagnostic)])]);
+  if (key === renderKey) { scheduleRead(); return; }
+  const previousTop = $('messages').scrollTop;
   const wasNearBottom = $("messages").scrollHeight - $("messages").scrollTop - $("messages").clientHeight < 110;
   const switched = !renderKey; renderKey = key;
   const entries = [...messages.map((message) => ({ message, createdAt: message.createdAt, id: message.id })),
@@ -238,7 +303,15 @@ function renderChat() {
     const button = document.createElement("button"); button.className = "worktree"; button.textContent = `Открыть рабочую копию · ${name(job.agent)}`;
     button.onclick = () => window.hub.openWorktree(job.id).catch((e) => toast(errorText(e))); div.append(button); $("messages").append(div);
   }
-  if (switched || wasNearBottom) $("messages").scrollTop = $("messages").scrollHeight;
+  if (thread && participations.length) {
+    const panel = document.createElement('div'); panel.className = 'participation-list';
+    panel.innerHTML = participations.map((p) => participationHtml(p, thread)).join('');
+    panel.querySelectorAll('[data-participation]').forEach((button) => button.onclick = () => void decideParticipation(button));
+    $('messages').append(panel);
+  }
+  // Native immediate positioning, before paint. Never animate the entire history.
+  $('messages').scrollTo({ top: switched || wasNearBottom ? $('messages').scrollHeight : previousTop, behavior: 'instant' });
+  scheduleRead();
 }
 
 function mentionOptions() {
@@ -338,7 +411,7 @@ $("add-agent").onclick = () => editAgent();
 function editAgent(id) {
   const agent = appState.settings.agents.find((a) => a.id === id);
   if (id && !agent) return toast("Этот агент настроен на другом компьютере владельца.");
-  openModal(agent ? `Настройки · ${agent.name}` : "Подключить агента", `<form id="agent-form"><div class="agent-editor-header"><label>Имя агента<input id="agent-name" required maxlength="80" value="${esc(agent?.name ?? "")}" placeholder="Например: Backend reviewer"></label><label>Исполнитель<select id="agent-executor">${["codex", "claude", "cursor"].map((p) => `<option value="${p}" ${agent?.executor === p ? "selected" : ""}>${p === "claude" ? "Claude Code" : p === "cursor" ? "Cursor CLI" : "Codex"}</option>`).join("")}</select></label></div><label>Рабочая папка<div class="row"><input id="agent-directory" required value="${esc(agent?.directory ?? "")}" placeholder="Папка проекта или документов"><button type="button" id="choose-directory">Выбрать</button></div></label><label>Описание и контекст<textarea id="agent-description" rows="3" placeholder="С чем работает агент, какие вопросы ему адресовать">${esc(agent?.description ?? "")}</textarea></label><label>Резервный агент<select id="agent-fallback"><option value="">Не назначен — показать ошибку в треде</option>${appState.settings.agents.filter((a) => a.id !== id).map((a) => `<option value="${a.id}" ${agent?.fallback === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select></label><details><summary class="hint">Путь к исполняемому файлу CLI (если не найден автоматически)</summary><label><div class="row"><input id="agent-binary" value="${esc(agent?.binary ?? "")}" placeholder="Автоматически"><button type="button" id="choose-binary">Выбрать</button></div></label></details><label class="check"><input id="agent-enabled" type="checkbox" ${agent?.enabled !== false ? "checked" : ""}> Принимать адресные запросы участников моих спейсов</label><label class="check"><input id="agent-write" type="checkbox" ${agent?.allowWrite ? "checked" : ""}> Разрешить мне запускать изменения в отдельной Git-копии</label><p class="hint">Вход в аккаунт — через установленный CLI. Обсуждения и ответы передаются провайдеру агента и участникам спейса. Для изменений нужен Git-репозиторий. Push, merge и деплой приложение не выполняет. CLI-интеграции и их разрешения настраиваются отдельно.</p><p id="agent-health" class="inline-state"></p><div class="modal-actions"><button id="check-agent" type="button" class="quiet">Проверить подключение</button><button class="primary">Сохранить агента</button></div></form>`);
+  openModal(agent ? `Настройки · ${agent.name}` : "Подключить агента", `<form id="agent-form"><div class="agent-editor-header"><label>Имя агента<input id="agent-name" required maxlength="80" value="${esc(agent?.name ?? "")}" placeholder="Например: Backend reviewer"></label><label>Исполнитель<select id="agent-executor">${["codex", "claude", "cursor"].map((p) => `<option value="${p}" ${agent?.executor === p ? "selected" : ""}>${p === "claude" ? "Claude Code" : p === "cursor" ? "Cursor CLI" : "Codex"}</option>`).join("")}</select></label></div><label>Рабочая папка<div class="row"><input id="agent-directory" required value="${esc(agent?.directory ?? "")}" placeholder="Папка проекта или документов"><button type="button" id="choose-directory">Выбрать</button></div></label><label>Описание и контекст<textarea id="agent-description" rows="3" placeholder="С чем работает агент, какие вопросы ему адресовать">${esc(agent?.description ?? "")}</textarea></label><label>Резервный агент<select id="agent-fallback"><option value="">Не назначен — показать ошибку в треде</option>${appState.settings.agents.filter((a) => a.id !== id).map((a) => `<option value="${a.id}" ${agent?.fallback === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select></label><details><summary class="hint">Путь к исполняемому файлу CLI (если не найден автоматически)</summary><label><div class="row"><input id="agent-binary" value="${esc(agent?.binary ?? "")}" placeholder="Автоматически"><button type="button" id="choose-binary">Выбрать</button></div></label></details><label class="check"><input id="agent-enabled" type="checkbox" ${agent?.enabled !== false ? "checked" : ""}> Разрешить участникам спейсов запрашивать участие агента</label><label class="check"><input id="agent-write" type="checkbox" ${agent?.allowWrite ? "checked" : ""}> Разрешить мне запускать изменения в отдельной Git-копии</label><p class="hint">Чужие обращения и автоматические передачи требуют вашего разрешения на 1 или 3 задачи в треде. Резервному агенту нужно отдельное разрешение. Сохранение настроек отзывает текущие разрешения. Вход в аккаунт — через установленный CLI. Обсуждения и ответы передаются провайдеру агента и участникам спейса. Для изменений нужен Git-репозиторий. Push, merge и деплой приложение не выполняет. CLI-интеграции и их разрешения настраиваются отдельно.</p><p id="agent-health" class="inline-state"></p><div class="modal-actions"><button id="check-agent" type="button" class="quiet">Проверить подключение</button><button class="primary">Сохранить агента</button></div></form>`);
   const input = () => ({ id: agent?.id ?? "", name: $("agent-name").value, executor: $("agent-executor").value, directory: $("agent-directory").value, description: $("agent-description").value, binary: $("agent-binary").value, fallback: $("agent-fallback").value || null, enabled: $("agent-enabled").checked, allowWrite: $("agent-write").checked });
   $("choose-directory").onclick = async () => { const path = await window.hub.directory(); if (path) $("agent-directory").value = path; };
   $("choose-binary").onclick = async () => { const path = await window.hub.binary(); if (path) $("agent-binary").value = path; };
@@ -387,11 +460,18 @@ function openInvitations(selectedSpace = spaceId) {
     const result = await window.hub.joinInvite($("space-invitation").value.trim()); closeModal(); navigate(result.space, null); toast("Вы в спейсе. Можно общаться и подключать агентов.");
   }); };
 }
-$("inbox").onclick = () => {
-  openModal("Уведомления", data.notices.slice().reverse().slice(0, 100).map((n, i) => `<button class="inbox-item" data-index="${i}"><strong>${esc(n.title)}</strong><small>${esc(friendly(n.body))}</small></button>`).join("") || '<p class="hint">Пока нет уведомлений. Здесь появятся упоминания и ответы на ваши запросы.</p>');
-  const notices = data.notices.slice().reverse().slice(0, 100);
-  $("modal-content").querySelectorAll("[data-index]").forEach((b) => b.onclick = () => { const n = notices[Number(b.dataset.index)]; closeModal(); navigate(n.space, n.thread, n.channel); });
-};
+function renderInbox() {
+  const notices = data.notices.slice().reverse(), unread = notices.filter((n) => !n.read), seen = notices.filter((n) => n.read);
+  const render = (items) => items.slice(0, 100).map((n) => `<button class="inbox-item ${n.read ? 'read' : 'unread'}" data-notice="${n.seq}"><strong>${esc(n.title)}</strong><small>${esc(friendly(n.body))}</small></button>`).join('');
+  const expanded = $('read-notices')?.open ?? false, through = data.sequence;
+  $('modal-content').innerHTML = `<section id="inbox-list"><div class="inbox-actions"><button id="read-all-notices" class="quiet" ${!unread.length || data.readVersion !== 1 ? 'disabled' : ''}>Отметить все прочитанными</button><button id="clear-read-notices" class="quiet" ${!seen.length || data.readVersion !== 1 ? 'disabled' : ''}>Очистить прочитанные</button></div><h3>Новые · ${unread.length}</h3>${render(unread) || '<p class="hint">Новых уведомлений нет.</p>'}<details id="read-notices" ${expanded ? 'open' : ''}><summary>Прочитанные · ${seen.length}</summary>${render(seen)}</details><p class="hint">Показано до 100 в каждой группе. Очистка затрагивает только ваши уведомления — сообщения и запросы согласования останутся. Отметка уведомлений не помечает переписку прочитанной.</p></section>`;
+  $('modal-content').querySelectorAll('[data-notice]').forEach((b) => b.onclick = () => { const n = notices.find((n) => n.seq === Number(b.dataset.notice)); closeModal(); navigate(n.space, n.thread, n.channel); });
+  for (const [id, action] of [['read-all-notices', 'read'], ['clear-read-notices', 'clear-read']]) $(id).onclick = () => {
+    $(id).disabled = true;
+    void window.hub.call('notices', { action, through }).then(() => { if ($('modal').open && $('inbox-list')) renderInbox(); }).catch((e) => { toast(errorText(e)); if ($('modal').open && $('inbox-list')) renderInbox(); });
+  };
+}
+$('inbox').onclick = () => { openModal('Уведомления', ''); renderInbox(); };
 $("connect-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { const result = await window.hub.connect({ url: $("hub-url").value.trim(), credential: $("credential").value.trim(), name: $("join-name").value.trim(), type: $("raw-token").checked ? "token" : "invite" }); $("credential").value = ""; receive(result); }, "connect-error"); };
 $("local-test").onclick = () => void safely(async () => receive(await window.hub.local()), "connect-error");
 window.hub.onChanged(receive);

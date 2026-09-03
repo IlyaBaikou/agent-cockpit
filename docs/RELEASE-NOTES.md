@@ -1,4 +1,14 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.6.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.7.
+
+New in 0.2.7:
+
+- Owners approve incoming requests: one task, or discussion with three tasks. No model/summary call while waiting. Automatic handoffs (including returns to the initiating employee's agent and fallbacks) need per-agent/per-thread permission. Repeated mentions cannot refill it. Explicit owner requests remain one-off.
+- Grants are reserved atomically when queueing; errors, cancellations and queue timeouts are not refunded. A task may include a summary call: this controls attempts, not exact tokens. The 12-answer chain cap remains independent.
+- Decisions are owner-only and check request/thread revisions. Stop, completion, archive, agent settings changes and membership removal revoke affected grants. Write fallback requires a new explicit owner write request.
+- Persistent unread badges on spaces, channels, thread lists and thread cards. Reading a channel does not read its threads. Background windows and readers of older history preserve new badges. Threads open directly at the end without animated scrolling; incoming updates preserve history-reading positions.
+- Inbox counts unread notices only, with read history, “Mark all read” and “Clear read”. Viewing a conversation reads its observed notices. Clearing does not remove messages, resolve approvals, affect other employees, or replay OS banners. Already displayed OS notification-center entries are not removed.
+- Russian `ARCHITECTURE.md` for contributors and explicit `--profile-dir` isolation for development.
+- Update coordinator **before** desktops. New desktops stop runners on servers without consent support. Old desktops cannot bypass the new server gate but lack approval controls. Migration preserves history/settings/credentials, cancels old queued jobs, and lets running jobs finish with subsequent handoffs gated. Old history becomes a read baseline; the existing inbox remains available for clearing. Do not roll back to an old server while agents are enabled: old code does not enforce grants.
 
 New in 0.2.6:
 

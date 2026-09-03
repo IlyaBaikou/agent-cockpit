@@ -42,6 +42,13 @@ process.env.PATH = [...new Set([
 ])].filter(Boolean).join(delimiter);
 app.setName("Agent Hub");
 app.setAppUserModelId("com.animaplay.agenthub");
+// Explicit development profile; never discover/copy a production profile.
+const profileIndex = process.argv.indexOf("--profile-dir");
+if (profileIndex >= 0) {
+  const profile = resolve(field(process.argv[profileIndex + 1], "Каталог отдельного профиля", 4096));
+  await mkdir(profile, { recursive: true });
+  app.setPath("userData", profile); app.setPath("sessionData", profile);
+}
 if (!process.argv.includes("--smoke-test") && !app.requestSingleInstanceLock()) app.exit(0);
 app.on("second-instance", () => show());
 
@@ -94,7 +101,7 @@ async function startLocal(): Promise<void> {
 }
 async function stopRunners(): Promise<void> { for (const runner of runners.values()) runner.stop(); runners.clear(); }
 function startRunners(): void {
-  if (!client || !snapshot) return;
+  if (!client || !snapshot || snapshot.participationVersion !== 1) return;
   for (const agent of settings.agents) {
     if (!agent.enabled || runners.has(agent.id)) continue;
     const remote = snapshot.agents.find((a) => a.id === agent.id && a.owner === snapshot!.me.id && a.device === settings.device);
@@ -114,6 +121,10 @@ async function sync(fresh = false): Promise<void> {
 async function performSync(): Promise<void> {
   try {
     snapshot = await client!.call<Snapshot>("sync", { channelVersion: 1 }); connectionError = "";
+    if (snapshot.participationVersion !== 1) {
+      await stopRunners();
+      connectionError = "На сервере нет согласования участия. Обновите координатор до 0.2.7; локальные раннеры остановлены";
+    }
     const notices = pendingNotices(snapshot.notices, settings.cursor, snapshot.sequence);
     if (notices.cursor !== settings.cursor) {
       settings.cursor = notices.cursor; await save();
@@ -159,11 +170,12 @@ function handlers(): void {
     await startLocal(); await save(); client = new CollaborationClient(settings.url, settings.token); await sync(); return state();
   });
   register("hub:call", async (op: string, input: Record<string, unknown>) => {
-    requireValue(client && ["post", "space", "members", "thread-state", "profile", "revoke-invite", "channel", "channel-state", "channel-preference", "thread-subscription"].includes(op), "Недоступная операция");
+    requireValue(client && ["post", "space", "members", "thread-state", "profile", "revoke-invite", "channel", "channel-state", "channel-preference", "thread-subscription", "participation", "read", "notices"].includes(op), "Недоступная операция");
+    requireValue(op !== "post" || snapshot?.participationVersion === 1, "Сначала обновите координатор до 0.2.7");
     const result = await client.call(op, { ...input, requestId: typeof input.requestId === "string" ? input.requestId : randomUUID() });
     // A post is acknowledged by the coordinator already. Do not hold its receipt
     // behind another full poll. The renderer reconciles it by request/message ID.
-    if (op === "post") void sync(true);
+    if (op === "post" || op === "read") void sync(true);
     else await sync(true);
     return result;
   });

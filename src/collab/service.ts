@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { secureTokenMatch, type ControlCredential } from "../control-auth.js";
-import { CollabError, field, generalChannelId, mentions, requireValue, type Agent, type Channel, type GroupInvitation, type Job, type Message, type Snapshot, type Space, type State, type Thread } from "./model.js";
+import { CollabError, field, generalChannelId, mentions, requireValue, type Agent, type Channel, type GroupInvitation, type Job, type Message, type Participation, type Snapshot, type Space, type State, type Thread } from "./model.js";
 import { makeGeneralChannel, migrateChannels } from "./channels.js";
+import { manageNotices, markRead, migrateReadState } from "./read-state.js";
 import type { StateStore } from "./store.js";
 import { acceptMemory, validMemory, type ContextPacket, type ContextStats } from "./context.js";
 import { acceptDiagnostic, diagnosticMessage, redact } from "../agents/diagnostics.js";
@@ -44,7 +45,7 @@ export class CollaborationService {
     if (op === "sync" || op === "claim") {
       const preview = await this.store.read((s) => {
         const actor = this.authenticate(s, token);
-        if (s.channelsVersion !== 1) return { fast: false, result: null };
+        if (s.channelsVersion !== 1 || s.participationVersion !== 1 || s.readVersion !== 1) return { fast: false, result: null };
         if (s.jobs.some((j) => this.active(j) && j.expiresAt < this.now())) return { fast: false, result: null };
         if (op === "sync") return { fast: true, result: this.snapshot(s, actor, input.channelVersion === 1) };
         this.ownedAgent(s, actor, input.agent, input.device);
@@ -56,6 +57,8 @@ export class CollaborationService {
     return this.store.transact((s) => {
       const actor = this.authenticate(s, token);
       migrateChannels(s);
+      migrateReadState(s);
+      this.migrateParticipation(s);
       this.sweep(s);
       const key = typeof input.requestId === "string" ? input.requestId : undefined;
       if (key) {
@@ -155,6 +158,7 @@ export class CollaborationService {
         channel.archived = b.archived;
         if (channel.archived) for (const thread of s.threads.filter((t) => t.channel === channel.id)) {
           thread.revision++;
+          this.revokeParticipation(s, (p) => p.thread === thread.id);
           for (const job of s.jobs.filter((j) => j.thread === thread.id && this.active(j))) this.cancel(s, job, "Канал архивирован");
         }
         this.message(s, space.id, null, "hub", "system", `${this.name(s, actor)}: канал ${channel.archived ? "архивирован. История доступна для чтения" : "восстановлен. Агенты не запускаются автоматически"}.`, channel.id);
@@ -187,6 +191,9 @@ export class CollaborationService {
         requireValue(members.every((id) => s.employees.some((e) => e.id === id)), "Неизвестный сотрудник");
         const before = space.members;
         space.members = [...new Set([actor, ...members])];
+        this.revokeParticipation(s, (p) => s.threads.find((t) => t.id === p.thread)?.space === space.id
+          && (!space.members.includes(s.agents.find((a) => a.id === p.agent)!.owner)
+            || before.some((m) => !space.members.includes(m))));
         for (const member of space.members.filter((m) => !before.includes(m))) this.notice(s, member, "Вы добавлены в спейс", space.name, space.id, null);
         for (const job of s.jobs.filter((j) => this.active(j) && s.threads.find((t) => t.id === j.thread)?.space === space.id)) {
           const agent = s.agents.find((a) => a.id === job.agent)!;
@@ -208,6 +215,7 @@ export class CollaborationService {
           seen.add(cursor); cursor = s.agents.find((a) => a.id === cursor)?.fallback ?? null;
         }
         requireValue(!s.jobs.some((j) => j.agent === id && this.active(j)), "Сначала остановите активное задание этого агента", 409);
+        if (existing) this.revokeParticipation(s, (p) => p.agent === id);
         const agent: Agent = {
           id, owner: actor, name: field(b.name, "Имя агента", 80), description: typeof b.description === "string" ? b.description.slice(0, 2000) : "",
           executor: b.executor as Agent["executor"], device: field(b.device, "Устройство"),
@@ -229,11 +237,15 @@ export class CollaborationService {
         return { ok: true };
       }
       case "post": return this.post(s, actor, b);
+      case "read": return markRead(s, actor, b);
+      case "notices": return manageNotices(s, actor, b);
+      case "participation": return this.decideParticipation(s, actor, b);
       case "thread-state": {
         const thread = this.thread(s, actor, b.thread);
         this.writableChannel(s, actor, thread.channel ?? generalChannelId(thread.space));
         requireValue(b.status === "paused" || b.status === "resolved" || b.status === "open", "Неверный статус");
         for (const job of s.jobs.filter((j) => j.thread === thread.id && this.active(j))) this.cancel(s, job, "Остановлено участником обсуждения");
+        this.revokeParticipation(s, (p) => p.thread === thread.id);
         thread.status = b.status; thread.revision++;
         this.message(s, thread.space, thread.id, actor, "system", `${this.name(s, actor)}: ${b.status === "resolved" ? "тред завершён" : b.status === "paused" ? "агенты остановлены" : "обсуждение возобновлено"}`);
         return thread;
@@ -245,15 +257,21 @@ export class CollaborationService {
         const job = s.jobs.find((j) => j.agent === agent.id && j.status === "queued");
         if (!job) return { job: null };
         const thread = this.thread(s, actor, job.thread);
+        this.space(s, job.requestedBy, thread.space);
+        this.writableChannel(s, actor, thread.channel ?? generalChannelId(thread.space));
+        const authorization = job.authorization;
+        requireValue(authorization && (authorization.kind === "owner" ? job.requestedBy === actor
+          : s.participations?.some((p) => p.id === authorization.participation && p.thread === job.thread && p.agent === agent.id
+            && p.status !== "revoked" && p.status !== "denied")), "Нет действующего разрешения на запуск", 409);
         job.status = "running"; job.lease = secret(); job.expiresAt = this.now() + LEASE;
         thread.status = "working";
         if (b.contextVersion === 1) {
           const context = this.context(s, job);
           const through = context.messages.at(-1)?.id;
           if (through) job.contextThrough = through;
-          return { job, prompt: this.prompt(s, job, true), agent, context };
+          return { job, prompt: this.prompt(s, job, true), agent, context, participationVersion: 1 };
         }
-        return { job, prompt: this.prompt(s, job), agent };
+        return { job, prompt: this.prompt(s, job), agent, participationVersion: 1 };
       }
       case "lease": {
         const job = this.leased(s, actor, b, true);
@@ -300,7 +318,7 @@ export class CollaborationService {
         if (route?.startsWith("agent:")) {
           const target = route.slice(6);
           if (job.remaining <= 1) this.wait(s, thread, job.requestedBy, "Достигнут лимит 12 ответов. Нужен человек для продолжения.");
-          else this.route(s, thread, target, job.requestedBy, "read", job.remaining - 1, []);
+          else this.route(s, thread, target, job.requestedBy, "read", job.remaining - 1, [], false, reply.id);
         } else if (route?.startsWith("human:")) {
           const member = route.slice(6);
           const space = s.spaces.find((sp) => sp.id === thread.space)!;
@@ -308,6 +326,7 @@ export class CollaborationService {
           else this.wait(s, thread, member, "Нужно решение человека. Ответьте и укажите агента для продолжения.");
         } else if (route === "done") {
           thread.status = "resolved";
+          this.revokeParticipation(s, (p) => p.thread === thread.id);
           this.notice(s, thread.owner, "Обсуждение завершено", thread.title, thread.space, thread.id);
         } else this.wait(s, thread, job.requestedBy, "Ответ получен без команды продолжения. Можно продолжить вручную через @упоминание.");
         return { ok: true };
@@ -354,15 +373,21 @@ export class CollaborationService {
       if (!s.threadSubscriptions!.some((f) => f.thread === thread.id && f.employee === actor)) s.threadSubscriptions!.push({ employee: actor, thread: thread.id, following: true });
       thread.revision++;
       if (targets.length) requireValue(!s.jobs.some((j) => j.thread === thread.id && this.active(j)), "Агент уже работает. Можно дописать сообщение без вызова, либо нажать «Стоп».", 409);
+      if (targets.length) {
+        // A new explicit target replaces the pending handoff, not its spent budget.
+        for (const p of s.participations ?? []) if (p.thread === thread.id && p.request && p.agent !== targets[0]) {
+          delete p.request; if (p.status === "pending") p.status = "allowed"; p.revision++;
+        }
+      }
     }
     const message = this.message(s, space.id, thread?.id ?? null, actor, "human", content, channel.id);
     if (typeof b.requestId === "string" && b.requestId) message.clientRequestId = b.requestId;
     this.notifyDiscussion(s, message);
-    if (thread && targets[0]) this.route(s, thread, targets[0], actor, b.mode === "write" ? "write" : "read", LIMIT, []);
+    if (thread && targets[0]) this.route(s, thread, targets[0], actor, b.mode === "write" ? "write" : "read", LIMIT, [], true, message.id);
     return { message, thread: thread ?? null };
   }
 
-  private route(s: State, thread: Thread, target: string, requester: string, mode: Job["mode"], remaining: number, visited: string[]): void {
+  private route(s: State, thread: Thread, target: string, requester: string, mode: Job["mode"], remaining: number, visited: string[], directOwnerPost = false, sourceMessage?: string): void {
     this.writableChannel(s, requester, thread.channel ?? generalChannelId(thread.space));
     const space = s.spaces.find((sp) => sp.id === thread.space)!;
     const agent = s.agents.find((a) => a.id === target && space.members.includes(a.owner));
@@ -372,10 +397,85 @@ export class CollaborationService {
     if (mode === "write" && (agent.owner !== requester || !agent.allowWrite)) {
       this.wait(s, thread, agent.owner, "Запрошены изменения кода. Только владелец агента может запустить их: включите разрешение в настройках и отправьте @агенту запрос в режиме «Изменения»."); return;
     }
-    const job: Job = { id: uid(), thread: thread.id, agent: agent.id, requestedBy: requester, mode, status: "queued", createdAt: this.now(), expiresAt: this.now() + QUEUE_WAIT, lease: null, revision: thread.revision, remaining, visited: [...visited, target], started: false };
+    // Permission for a write never follows a fallback, even before execution.
+    if (mode === "write" && !directOwnerPost) {
+      this.wait(s, thread, agent.owner, "Для резервного агента нужен отдельный запрос владельца в режиме «Изменения». Разрешение на разбор не разрешает правки."); return;
+    }
+    let authorization: NonNullable<Job["authorization"]> = { kind: "owner" };
+    if (!(directOwnerPost && requester === agent.owner)) {
+      let p = s.participations!.find((p) => p.thread === thread.id && p.agent === target);
+      if (!p) { p = { id: uid(), thread: thread.id, agent: target, status: "pending", remaining: 0, used: 0, revision: 0 }; s.participations!.push(p); }
+      if (p.status !== "allowed" || p.remaining <= 0) {
+        const notify = !p.request && p.status !== "denied";
+        p.request = { id: uid(), requestedBy: requester, sourceMessage: sourceMessage ?? s.messages.filter((m) => m.thread === thread.id && m.kind !== "system").at(-1)!.id,
+          chainRemaining: remaining, visited, createdAt: this.now() };
+        if (p.status !== "denied") p.status = "pending";
+        p.revision++; thread.status = "waiting";
+        if (notify) {
+          this.message(s, thread.space, thread.id, "hub", "system", `${agent.name}: ${p.used ? "лимит участия исчерпан" : "запрошено участие"}. Ожидает разрешения ${this.name(s, agent.owner)}. Модель не запускается до подтверждения. Если кнопок нет, обновите приложение до 0.2.7.`);
+          this.notice(s, agent.owner, "Разрешить участие агента?", `${agent.name} · ${thread.title}`, thread.space, thread.id);
+        } else if (p.status === "denied") this.message(s, thread.space, thread.id, "hub", "system", `${agent.name}: участие отклонено владельцем. Повторное упоминание не даёт разрешение.`);
+        return;
+      }
+      // Reserve before queueing. Failed, timed-out and cancelled attempts are not refunded.
+      p.remaining--; p.used++; p.revision++; delete p.request;
+      authorization = { kind: "participation", participation: p.id };
+    } else {
+      const p = s.participations!.find((p) => p.thread === thread.id && p.agent === target);
+      if (p?.request) { delete p.request; if (p.status === "pending") p.status = "allowed"; p.revision++; }
+    }
+    const job: Job = { id: uid(), thread: thread.id, agent: agent.id, requestedBy: requester, mode, status: "queued", createdAt: this.now(), expiresAt: this.now() + QUEUE_WAIT, lease: null, revision: thread.revision, remaining, visited: [...visited, target], started: false, authorization };
     s.jobs.push(job); thread.status = "working";
     if (agent.owner !== requester) this.notice(s, agent.owner, `${agent.name}: новый запрос`, thread.title, thread.space, thread.id);
     this.message(s, thread.space, thread.id, "hub", "system", `→ ${agent.name} · ${mode === "write" ? "изменения в отдельной рабочей копии" : "разбор"} · в очереди`);
+  }
+
+  private decideParticipation(s: State, actor: string, b: Record<string, unknown>): unknown {
+    const p = s.participations!.find((p) => p.id === b.id);
+    requireValue(p, "Запрос участия не найден", 404);
+    const thread = this.thread(s, actor, p.thread), agent = s.agents.find((a) => a.id === p.agent)!;
+    requireValue(agent.owner === actor, "Только владелец агента может разрешить участие", 403);
+    this.writableChannel(s, actor, thread.channel ?? generalChannelId(thread.space));
+    requireValue(p.revision === b.revision && thread.revision === b.threadRevision, "Обсуждение или запрос изменились. Прочитайте новые сообщения и повторите решение.", 409);
+    requireValue(b.action === "allow" || b.action === "deny" || b.action === "revoke", "Неверное решение");
+    if (b.action === "revoke") {
+      this.revokeParticipation(s, (value) => value.id === p.id);
+      this.message(s, thread.space, thread.id, actor, "system", `${this.name(s, actor)} отозвал участие ${agent.name}.`);
+      return { ok: true };
+    }
+    requireValue(thread.status !== "resolved" && thread.status !== "paused" && p.request && p.status !== "revoked", "Запрос уже не актуален", 409);
+    requireValue(!s.jobs.some((j) => j.thread === thread.id && this.active(j)), "В треде уже работает агент. Дождитесь ответа или остановите его.", 409);
+    const request = p.request;
+    this.space(s, request.requestedBy, thread.space);
+    requireValue(agent.enabled, "Агент отключён", 409);
+    if (b.action === "deny") {
+      p.status = "denied"; p.remaining = 0; p.revision++;
+      this.message(s, thread.space, thread.id, actor, "system", `${this.name(s, actor)} отклонил участие ${agent.name}.`);
+      this.notice(s, request.requestedBy, "Участие агента отклонено", agent.name, thread.space, thread.id);
+      return { ok: true };
+    }
+    requireValue(b.runs === 1 || b.runs === 3, "Можно разрешить 1 или 3 запуска");
+    p.status = "allowed"; p.remaining = b.runs; p.revision++;
+    this.message(s, thread.space, thread.id, actor, "system", `${this.name(s, actor)} разрешил ${agent.name}: ${b.runs} запуска в этом треде, только разбор. Очередь и ошибки также расходуют лимит.`);
+    this.route(s, thread, agent.id, request.requestedBy, "read", request.chainRemaining, request.visited, false, request.sourceMessage);
+    return { ok: true };
+  }
+
+  private revokeParticipation(s: State, matches: (p: Participation) => boolean): void {
+    for (const p of s.participations ?? []) if (matches(p) && p.status !== "revoked") {
+      p.status = "revoked"; p.remaining = 0; p.revision++; delete p.request;
+      for (const job of s.jobs.filter((j) => this.active(j) && j.authorization?.kind === "participation" && j.authorization.participation === p.id)) {
+        this.cancel(s, job, "Разрешение на участие отозвано");
+      }
+    }
+  }
+
+  private migrateParticipation(s: State): void {
+    if (s.participationVersion === 1) return;
+    s.participationVersion = 1; s.participations ??= [];
+    // Never infer consent for an old queued handoff. Already-running tasks may finish;
+    // their next route still passes through the new gate.
+    for (const job of s.jobs.filter((j) => j.status === "queued")) this.cancel(s, job, "Хаб обновлён: старый запрос остановлен. Вызовите агента заново с подтверждением участия");
   }
 
   private fallback(s: State, job: Job, reason: string): void {
@@ -442,7 +542,7 @@ export class CollaborationService {
     return { space: space.id };
   }
   private message(s: State, space: string, thread: string | null, author: string, kind: Message["kind"], content: string, channel?: string): Message {
-    const message = { id: uid(), space, thread, channel: channel ?? s.threads.find((t) => t.id === thread)?.channel ?? generalChannelId(space), author, kind, content, createdAt: this.now() };
+    const message = { id: uid(), space, thread, channel: channel ?? s.threads.find((t) => t.id === thread)?.channel ?? generalChannelId(space), author, kind, content, createdAt: this.now(), seq: s.messageSequence = (s.messageSequence ?? 0) + 1 };
     s.messages.push(message); return message;
   }
   private notice(s: State, employee: string, title: string, body: string, space: string, thread: string | null, channel?: string, event?: string): void {
@@ -486,6 +586,9 @@ export class CollaborationService {
     const tids = new Set(threads.map((t) => t.id));
     return {
       me: s.employees.find((e) => e.id === actor)!, revision: s.revision,
+      participationVersion: 1, participations: (s.participations ?? []).filter((p) => tids.has(p.thread)),
+      readVersion: 1, readBaseline: s.readBaselines?.find((p) => p.employee === actor)?.through ?? 0,
+      readPositions: (s.readPositions ?? []).filter((p) => p.employee === actor && cids.has(p.channel) && (!p.thread || tids.has(p.thread))),
       employees: s.employees, agents: s.agents.map(({ diagnostic, ...a }) => ({ ...a, ready: a.ready && a.seenAt > this.now() - LEASE,
         ...(diagnostic && a.owner === actor && diagnostic.at > this.now() - 14 * 86400_000 ? { diagnostic } : {}) })),
       spaces, threads, messages: s.messages.filter((m) => ids.has(m.space) && visible(m)),

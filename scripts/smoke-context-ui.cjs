@@ -237,6 +237,92 @@ app.whenReady().then(async () => {
       if (document.querySelector('[data-diagnostic]')) throw new Error('Report button visible without permission/report');
     })()`);
     console.log("DIAGNOSTICS_UI_SMOKE_OK");
+    await window.webContents.executeJavaScript(`(async () => {
+      const saved = structuredClone(data);
+      const check = (v, why) => { if (!v) throw new Error(why); };
+      const t = data.threads.find(t => t.id === 'demo-thread'); t.status = 'waiting';
+      data.participations = [{ id: 'permission', thread: t.id, agent: 'a', status: 'pending', remaining: 0, used: 0, revision: 1,
+        request: { id: 'request', requestedBy: 'peer', sourceMessage: 'm3', createdAt: Date.now(), chainRemaining: 12, visited: [] } }];
+      data.messages.find(m => m.id === 'm3').content = '<img src=x onerror=alert(1)> Can you review the API?';
+      await window.hub.testSetSnapshot(data); navigate('demo-space', 'demo-thread');
+      check(document.querySelectorAll('[data-participation][data-action="allow"]').length === 2, 'Owner needs 1 and 3 run controls');
+      check(!document.querySelector('.participation-card img'), 'Approval question is untrusted text');
+      check(document.getElementById('job-status').innerText.includes('ожидает разрешения'), 'Missing approval status');
+      data.agents.find(a => a.id === 'a').owner = 'peer'; renderKey = ''; renderChat();
+      check(!document.querySelector('[data-participation]'), 'Non-owner must not see approval buttons');
+      data.agents.find(a => a.id === 'a').owner = 'owner'; await window.hub.testSetSnapshot(data); renderKey = ''; renderChat();
+      document.querySelector('[data-participation][data-runs="3"]').click();
+      await new Promise(r => setTimeout(r, 70));
+      const call = (await window.hub.testCalls()).filter(c => c.op === 'participation').at(-1);
+      check(call.input.runs === 3 && call.input.revision === 1 && call.input.threadRevision === t.revision, 'Decision must carry scope/revisions');
+      check(document.querySelector('.participation-card').innerText.includes('Доступно запусков: 2'), 'Budget remaining missing');
+      document.querySelector('[data-action="revoke"]').click(); await new Promise(r => setTimeout(r, 50));
+      check(document.querySelector('.participation-card').innerText.includes('Разрешение отозвано'), 'Revocation missing');
+      await window.hub.testSetSnapshot(saved);
+    })()`);
+    console.log('PARTICIPATION_UI_SMOKE_OK');
+    await window.webContents.executeJavaScript(`(async () => {
+      const saved = structuredClone(data), check = (v, why) => { if (!v) throw new Error(why); };
+      let focused = false;
+      Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => focused });
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+      const t = data.threads.find(t => t.id === 'demo-thread'); t.channel = 'general:demo-space';
+      data.readPositions = []; data.readBaseline = 0; data.participations = [];
+      data.messages = [
+        { id: 'root-unread', space: 'demo-space', channel: 'general:demo-space', thread: null, author: 'peer', kind: 'human', seq: 1, createdAt: 1, content: 'General chat message' },
+        ...Array.from({ length: 55 }, (_, i) => ({ id: 'scroll-' + i, space: 'demo-space', channel: 'general:demo-space', thread: t.id, author: 'peer', kind: 'human', seq: i + 2, createdAt: i + 2, content: 'Message ' + i + ': long synthetic conversation content. '.repeat(5) }))
+      ];
+      data.notices = [{ seq: 1, employee: 'owner', space: 'demo-space', channel: 'general:demo-space', thread: t.id, title: 'Thread reply', body: 'Test' },
+        { seq: 2, employee: 'owner', space: 'demo-space', channel: 'general:demo-space', thread: null, title: 'Root reply', body: 'Test' }]; data.sequence = 2;
+      await window.hub.testSetSnapshot(data); navigate('demo-space', null, 'general:demo-space');
+      check(document.querySelector('[data-space="demo-space"] .unread-badge').textContent === '56', 'Space aggregates all unread');
+      check(document.querySelector('[data-channel="general:demo-space"] .unread-badge').textContent === '56', 'Channel aggregates root and thread');
+      check(document.querySelector('[data-thread="demo-thread"] .unread-badge').textContent === '55', 'Thread has separate unread');
+      focused = true; markCurrentRead(); await new Promise(r => setTimeout(r, 80));
+      check(document.querySelector('[data-space="demo-space"] .unread-badge').textContent === '55', 'Opening channel must not read its thread');
+      navigate('demo-space', t.id, 'general:demo-space');
+      const box = document.getElementById('messages');
+      check(box.scrollHeight - box.scrollTop - box.clientHeight < 2, 'Thread must open at end before animation');
+      check(getComputedStyle(box).scrollBehavior === 'auto', 'History must not animate on navigation');
+      markCurrentRead(); await new Promise(r => setTimeout(r, 80));
+      check(!document.querySelector('[data-space="demo-space"] .unread-badge'), 'Opening thread must clear its badges');
+      check(!document.getElementById('inbox-count').textContent, 'Seen replies must clear notification badge');
+      focused = false;
+      data.messages.push({ ...data.messages.at(-1), id: 'background-new', seq: 57, content: 'Background arrival' });
+      await window.hub.testSetSnapshot(data); await new Promise(r => setTimeout(r, 80));
+      check(unreadMessages().length === 1, 'Background window must not read arrivals');
+      focused = true; box.scrollTop = 100; const beforeTop = box.scrollTop;
+      data.messages.push({ ...data.messages.at(-1), id: 'history-new', seq: 58, content: 'Arrival while reading history' });
+      await window.hub.testSetSnapshot(data); await new Promise(r => setTimeout(r, 60));
+      check(Math.abs(box.scrollTop - beforeTop) < 2, 'New arrivals must preserve history scroll position');
+      check(unreadMessages().length === 2, 'History readers must not consume new messages');
+      data.notices.push({ seq: 3, employee: 'owner', space: 'demo-space', channel: 'general:demo-space', thread: t.id, title: 'New', body: 'Test' }); data.sequence = 3;
+      await window.hub.testSetSnapshot(data); document.getElementById('inbox').click();
+      check(document.querySelectorAll('.inbox-item.unread').length === 1, 'Unread notices group');
+      document.getElementById('read-all-notices').click(); await new Promise(r => setTimeout(r, 60));
+      check(document.querySelectorAll('.inbox-item.unread').length === 0, 'Mark all notices read');
+      check(unreadMessages().length === 2, 'Marking inbox read must not read chat history');
+      document.getElementById('clear-read-notices').click(); await new Promise(r => setTimeout(r, 60));
+      check(document.querySelectorAll('.inbox-item').length === 0, 'Clear read notices');
+      check(data.messages.length === 58, 'Clearing inbox must keep all messages');
+      closeModal(); delete document.hasFocus; delete document.visibilityState; await window.hub.testSetSnapshot(saved);
+    })()`);
+    console.log('UNREAD_SCROLL_NOTICES_UI_SMOKE_OK');
+    if (process.argv[2]) {
+      await window.webContents.executeJavaScript(`(async () => {
+        data.participations = [{ id: 'visual-approval', thread: 'demo-thread', agent: 'a', status: 'pending', remaining: 0, used: 3, revision: 1,
+          request: { id: 'visual-request', requestedBy: 'peer', sourceMessage: 'm3', createdAt: Date.now(), chainRemaining: 6, visited: [] } }];
+        data.messages.find(m => m.id === 'm3').content = 'Проверь, что новое поле nextLevelXp не ломает старые клиенты. Если контракт совместим, предложи формат ответа для максимального уровня. Пока только разбор, без изменений кода.';
+        document.getElementById('toast').classList.add('hidden'); document.getElementById('composer').value = '';
+        data.threads.find(t => t.id === 'demo-thread').status = 'waiting';
+        await window.hub.testSetSnapshot(data); navigate('demo-space', 'demo-thread');
+      })()`);
+      for (const theme of ['dark', 'light']) {
+        await window.webContents.executeJavaScript(`window.hub.preferences({ theme: '${theme}' })`);
+        await window.webContents.executeJavaScript(`new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+        writeFileSync(resolve(process.argv[2]).replace(/\.png$/, '-approval-' + theme + '.png'), (await window.webContents.capturePage()).toPNG());
+      }
+    }
     await window.webContents.executeJavaScript(`window.hub.preferences({ theme: 'system' });`);
     for (const color of ["dark", "light"]) {
       nativeTheme.themeSource = color;

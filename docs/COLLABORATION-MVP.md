@@ -22,7 +22,7 @@ Archive preserves messages, summaries and code read-only. The server blocks post
 
 Posting in a thread enables following unless explicitly unsubscribed. The header has a follow toggle; old thread owners, human participants and requesters are subscribed during migration. Followers receive new human/agent replies, with mention/follower duplicates combined per message. Direct mentions, job requests/results/failures and requests for a decision are still addressed to the relevant person. These notifications do not invoke models.
 
-Channel mute is per employee, stored on the coordinator. It suppresses all OS banners from that channel, including mentions/decisions, but preserves the inbox. The notification cursor advances past muted notices; unmuting does not replay them. Clicks navigate to the exact channel/thread. Removed space members cannot read channels, change preferences or receive new follower notices. Explicit unsubscribe persists even when posting again. Unread/read badges are not implemented.
+Channel mute is per employee, stored on the coordinator. It suppresses all OS banners from that channel, including mentions/decisions, but preserves the inbox. The notification cursor advances past muted notices; unmuting does not replay them. Clicks navigate to the exact channel/thread. Removed space members cannot read channels, change preferences or receive new follower notices. Explicit unsubscribe persists even when posting again. Since 0.2.7, persistent read cursors drive badges, viewing a conversation marks observed notices read, and the inbox supports marking/clearing read notices. These operations do not invoke models or approve requests; see [architecture](../ARCHITECTURE.md).
 
 A once-only migration adds General and assigns existing records to it without changing IDs, timestamps, content, credentials or valid context checkpoints. New sync clients advertise channelVersion 1; older clients see only General, never flattened content from other channels. Old posts without a channel go to General or an explicitly addressed thread's own channel. Upgrade coordinator and all desktops to 0.2.5. Access remains defined by space membership.
 
@@ -40,7 +40,7 @@ The server stores invitation hashes, not plaintext codes. Usage limits, enrollme
 
 Upgraded agents get a shared working summary, recent messages, the space's available agent directory, and their owner's configured context. The complete thread transcript is available through a job-scoped read-only archive, including all omitted code blocks. They read local code through their own executor. An agent ends its answer with one ROUTE directive: a peer agent ID, a human ID, done, or unable. The UI displays readable names; provider names are never used as routing identities. See [context optimization](CONTEXT.md) for checkpoint validation, retrieval, privacy and cost caveats.
 
-The chain is capped at 12 answers. It pauses for a human when that limit is reached, an approval is needed, or a person added context while an answer was being generated. Reply and explicitly mention the next agent to continue. Stop cancels pending/running work; a stopped agent's late result cannot restart the chain. Completion marks the thread resolved; humans can reopen it.
+The chain is capped at 12 answers. Independently, 0.2.7 gates incoming and automatic work with owner-approved per-agent/per-thread grants of one or three reserved tasks. Explicit owner posts permit one task only. Fallbacks need their own permission; pending requests do not create jobs or invoke models. Stop and completion revoke grants, and reopening does not restore them. Human changes during execution pause routing. See [architecture](../ARCHITECTURE.md) for the consent contract.
 
 Each channel's chat includes one clickable card for each of its threads. Old threads appear in General. Cards show the creator, initial request, live status and reply count, excluding the initial request and system notices. Agent replies stay inside the thread. Drafts are separate per channel/thread. Humans can clarify, answer or redirect a discussion: a plain message adds context; @mention one agent to continue. If an agent is working, add a plain clarification and wait for the pause, or Stop before invoking another. Write permissions remain separate from conversational agreement.
 
@@ -48,7 +48,7 @@ An unavailable executor is handled by its explicitly configured fallback. Fallba
 
 ## Writes and trust boundary
 
-Other space members may ask your enabled agents to inspect your configured workspaces. Enabling an agent is consent to that pilot workflow; do not enable access to directories whose content those members must not see. The transcript, referenced documents and incoming agent messages are untrusted task data.
+Other space members may ask enabled agents to inspect configured workspaces. Since 0.2.7, enabling permits requests, not automatic execution: the owner approves bounded read participation for each agent/thread. Do not approve work in directories whose content those members must not see. The transcript, documents and incoming agent messages are untrusted task data.
 
 Writes require both the agent's local allow-write setting and an explicit write-mode request from its owner. Someone else requesting a fix triggers an owner decision, not an automatic write. Changes run in a separate Git worktree starting at the configured repo's current HEAD; uncommitted checkout changes are not copied. Results include the diff and branch name. Open working copy reveals it on the owner's computer. The app does not commit, push, merge, open PRs or deploy. Tests are only those actually run and reported by the executor; the app does not claim automatic validation. Claude's adapter has no shell tools and does not run tests.
 
@@ -76,7 +76,7 @@ Desktop settings live in the OS user-data directory, never in the installation f
 
 ## Deferred before company-wide adoption
 
-SSO, admin lifecycle/deprovisioning and token rotation UI; richer access policies; approval grants for remote fixes; audited/restricted MCP tools; encrypted transport beyond HTTPS for untrusted coordinators; normalized persistent queues; unread/read badges; full streaming tool logs; quota/cost controls; attachment storage/search; signed/notarized installers; auto-update; complete Windows real-agent and provider-version compatibility coverage.
+SSO, admin lifecycle/deprovisioning and token rotation UI; richer access policies; approval grants for remote fixes (read participation grants already exist); audited/restricted MCP tools; encrypted transport beyond HTTPS for untrusted coordinators; normalized persistent queues; full streaming tool logs; measured token/cost quotas beyond task-count limits; attachment storage/search; signed/notarized installers; auto-update; complete Windows real-agent and provider-version compatibility coverage.
 
 ## Development and releases
 

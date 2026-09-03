@@ -56,7 +56,8 @@ export class EmployeeRunner extends EventEmitter {
       // Claim unavailable jobs too after a failed health check: the server will route
       // on its queue timeout, without ever starting this executor.
       if (!this.#ready) return;
-      const result = await this.client.call<{ job: Job | null; prompt?: string; agent?: Agent; context?: ContextPacket }>("claim", { agent: this.agent.id, device: this.device, contextVersion: 1 });
+      const result = await this.client.call<{ job: Job | null; prompt?: string; agent?: Agent; context?: ContextPacket; participationVersion?: number }>("claim", { agent: this.agent.id, device: this.device, contextVersion: 1 });
+      if (result.job && (result.participationVersion !== 1 || !result.job.authorization)) throw new Error("Координатор не подтвердил разрешение на запуск. Обновите хаб до 0.2.7.");
       if (result.job && result.prompt) await this.execute(result.job, result.prompt, result.context);
     } catch (error) { this.emit("health", { id: this.agent.id, ready: false, detail: error instanceof Error ? error.message : String(error) }); }
     finally { this.#busy = false; }

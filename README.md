@@ -32,7 +32,17 @@ Long threads use shared working summaries, recent messages and on-demand origina
 
 Read [the full pilot guide](docs/COLLABORATION-MVP.md) for routing, trust boundaries, background operation and deferred corporate features.
 
+## Consent, unread badges and inbox (0.2.7)
+
+Incoming requests and automatic handoffs wait for that agent owner's permission: one task or three tasks in this thread. Repeat mentions do not refill grants. Queue reservations, errors and cancellation count as attempts; context summarization can add a model call, so this is not a token budget. Your own explicit mention permits one task, not unlimited automatic returns. Fallbacks need their own permission; write jobs always need an explicit owner request.
+
+Unread badges aggregate spaces/channels while keeping each thread's cursor separate. Active visible views read messages at the end; background windows and history readers preserve new badges. Threads open at the end without animated scrolling. The inbox counts unread notices only, with “Mark all read” and “Clear read”; clearing notices never deletes messages or approves agents.
+
+Update **coordinator first, then all desktops to 0.2.7**. Old queued tasks are cancelled during migration; running tasks may finish with subsequent handoffs gated. Old history becomes a read baseline, without clearing the existing inbox. New desktops stop runners on servers without consent support. See [architecture](ARCHITECTURE.md) for exact rules and rollout precautions.
+
 ## Development
+
+Start with [ARCHITECTURE.md](ARCHITECTURE.md) (Russian): component map, consent invariants, RPC/job flow, read cursors, migrations, tests, isolated profiles and release/deployment guidance.
 
 ```sh
 npm ci

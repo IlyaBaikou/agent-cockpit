@@ -5,6 +5,7 @@ let postBehavior = {};
 const receipts = new Map();
 const me = { id: "owner", name: "Alex" };
 const snapshot = {
+  participationVersion: 1, participations: [], readVersion: 1, readBaseline: 0, readPositions: [],
   groupInvitations: [{ id: "demo-invite", owner: "owner", space: "demo-space", createdAt: now, expiresAt: now + 7 * 86400_000, maxUses: 100, uses: 3, revoked: false }],
   me, revision: 1, sequence: 0, notices: [], employees: [me, { id: "peer", name: "Sam" }],
   agents: [{ id: "a", owner: "owner", name: "Backend Codex", executor: "codex", enabled: true, ready: true },
@@ -23,8 +24,9 @@ const snapshot = {
     { id: "m3", space: "demo-space", thread: "demo-thread", kind: "agent", author: "b", content: "Да, старые клиенты продолжат работать. Нужно решение человека по названию поля.", createdAt: now }],
   jobs: [{ id: "j", thread: "demo-thread", agent: "a", status: "done", mode: "read", contextStats: { historyChars: 52000, promptChars: 17000, summaryInputChars: 33000, summaryOutputChars: 1300, compacted: true, memoryReused: false } }],
 };
+snapshot.messages.forEach((m, i) => { m.seq = i + 1; });
 const settings = { agents: [], local: false, url: "https://hub.example", theme: "system", notifications: true };
-const state = () => ({ snapshot, connected: true, version: "0.2.5", settings });
+const state = () => ({ snapshot, connected: true, version: "0.2.7", settings });
 let changed = () => {};
 const calls = [];
 let messageSequence = 0;
@@ -43,6 +45,26 @@ contextBridge.exposeInMainWorld("hub", {
       if (receipts.has(input.requestId)) { changed(state()); return receipts.get(input.requestId); }
     }
     if (op === "revoke-invite") snapshot.groupInvitations[0].revoked = true;
+    if (op === 'read') {
+      const message = snapshot.messages.find(m => m.id === input.through);
+      if (message) {
+        const position = snapshot.readPositions.find(p => p.channel === input.channel && p.thread === input.thread);
+        if (position) position.through = Math.max(position.through, message.seq);
+        else snapshot.readPositions.push({ employee: snapshot.me.id, channel: input.channel, thread: input.thread, through: message.seq });
+      }
+      snapshot.notices.filter(n => (n.channel ?? 'general:demo-space') === input.channel && n.thread === input.thread && n.seq <= input.noticeThrough).forEach(n => n.read = true);
+    }
+    if (op === 'notices') {
+      if (input.action === 'read') snapshot.notices.filter(n => n.seq <= input.through).forEach(n => n.read = true);
+      else snapshot.notices = snapshot.notices.filter(n => !(n.read && n.seq <= input.through));
+    }
+    if (op === 'participation') {
+      const p = snapshot.participations.find(p => p.id === input.id);
+      if (input.action === 'allow') { p.status = 'allowed'; p.remaining = input.runs - 1; p.used++; delete p.request; }
+      else if (input.action === 'deny') { p.status = 'denied'; p.remaining = 0; }
+      else { p.status = 'revoked'; p.remaining = 0; delete p.request; }
+      p.revision++;
+    }
     if (op === "channel") {
       const c = snapshot.channels.find(c => c.id === input.id) ?? { id: "created-channel", space: input.space, owner: "owner", general: false, archived: false };
       Object.assign(c, { name: input.name, description: input.description }); if (!input.id) snapshot.channels.push(c); result = c;
@@ -55,6 +77,7 @@ contextBridge.exposeInMainWorld("hub", {
       if (thread && !snapshot.threads.some(t => t.id === thread.id)) snapshot.threads.push(thread);
       const message = { id: `created-message-${++messageSequence}`, space: input.space, channel: input.channel, thread: thread?.id ?? input.thread ?? null, kind: "human", author: "owner", content: input.content, createdAt: Date.now(), clientRequestId: input.requestId };
       snapshot.messages.push(message); result = { thread, message };
+      message.seq = Math.max(0, ...snapshot.messages.map(m => m.seq ?? 0)) + 1;
       if (input.requestId) receipts.set(input.requestId, result);
       if (behavior.loseAck) throw new Error("Подтверждение потеряно: тест отправки");
     }
@@ -63,4 +86,5 @@ contextBridge.exposeInMainWorld("hub", {
   connect: async (input) => { calls.push({ op: "connect", input }); return state(); },
   testCalls: () => calls,
   testConfigurePost: (behavior) => { postBehavior = behavior; },
+  testSetSnapshot: (value) => { Object.assign(snapshot, value); changed(state()); },
 });

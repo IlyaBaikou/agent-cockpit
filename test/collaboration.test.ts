@@ -28,7 +28,11 @@ function setup() {
   const post = (space: Space, target?: Agent, extra = {}): Promise<{ thread: Thread; message: unknown }> => call("post", { space: space.id, content: target ? `Please review @{a:${target.id}}` : "Hello people", ...extra });
   const claim = (a: Agent, token = alice): Promise<{ job: Job; prompt: string }> => call("claim", { agent: a.id, device: a.device }, token);
   const complete = (a: Agent, job: Job, content = "Answer\nROUTE: done", token = alice): Promise<unknown> => call("complete", { job: job.id, lease: job.lease, device: a.device, content }, token);
-  return { store, service, call, agent, space, post, claim, complete, advance: (ms: number) => { now += ms; } };
+  const approve = async (a: Agent, token = alice) => {
+    const s = await call<Snapshot>("sync", { channelVersion: 1 }, token), p = s.participations?.find((p) => p.agent === a.id && p.status === "pending");
+    if (p) await call("participation", { id: p.id, revision: p.revision, threadRevision: s.threads.find((t) => t.id === p.thread)!.revision, action: "allow", runs: 3 }, token);
+  };
+  return { store, service, call, agent, space, post, claim, complete, approve, advance: (ms: number) => { now += ms; } };
 }
 
 describe("employee-owned agents and shared spaces", () => {
@@ -43,6 +47,7 @@ describe("employee-owned agents and shared spaces", () => {
     const posted = await h.post(space, a); const first = await h.claim(a);
     expect((await h.claim(b, bob)).job).toBeNull();
     await h.complete(a, first.job, `Question for frontend\nROUTE: agent:${b.id}`);
+    expect((await h.claim(b, bob)).job).toBeNull(); await h.approve(b, bob);
     const second = await h.claim(b, bob); expect(second.job.thread).toBe(posted.thread.id);
     expect(second.prompt).toContain("Question for frontend"); expect(second.prompt).toContain("Please review");
     await h.complete(b, second.job, "Agreed\nROUTE: done", bob);
@@ -86,9 +91,11 @@ describe("employee-owned agents and shared spaces", () => {
     await h.complete(a, first.job, "Approve contract?\nROUTE: human:Bob");
     const waiting = await h.call<Snapshot>("sync", {}, bob); expect(waiting.threads[0]?.status).toBe("waiting"); expect(waiting.notices.at(-1)?.title).toBe("Нужно ваше решение");
     await h.call("post", { space: space.id, thread: thread.id, content: `Approved discussion direction, but no code edits. @{a:${a.id}} Continue with the peer.` }, bob);
+    await h.approve(a);
     const next = await h.claim(a); expect(next.prompt).toContain("Approved"); expect(next.prompt).toContain("Approve contract?");
     expect(next.job.mode).toBe("read"); expect(next.job.thread).toBe(thread.id);
     await h.complete(a, next.job, `Please review the clarified contract\nROUTE: agent:${peer.id}`);
+    await h.approve(peer, bob);
     const handoff = await h.claim(peer, bob);
     expect(handoff.job.thread).toBe(thread.id); expect(handoff.job.mode).toBe("read");
     expect(handoff.prompt).toContain("no code edits"); expect(handoff.prompt).toContain("clarified contract");
@@ -105,7 +112,7 @@ describe("employee-owned agents and shared spaces", () => {
   });
   it("limits a ping-pong chain to 12 answers", async () => {
     const h = setup(), a = await h.agent("A"), b = await h.agent("B"), space = await h.space(); await h.post(space, a);
-    for (let index = 0; index < 12; index++) { const active = index % 2 ? b : a, next = index % 2 ? a : b; const { job } = await h.claim(active); await h.complete(active, job, `Question ${index}\nROUTE: agent:${next.id}`); }
+    for (let index = 0; index < 12; index++) { const active = index % 2 ? b : a, next = index % 2 ? a : b; await h.approve(active); const { job } = await h.claim(active); await h.complete(active, job, `Question ${index}\nROUTE: agent:${next.id}`); }
     const s = await h.call<Snapshot>("sync"); expect(s.jobs).toHaveLength(12); expect(s.threads[0]?.status).toBe("waiting");
   });
 });
@@ -114,6 +121,7 @@ describe("fallbacks, leases and write boundaries", () => {
   it("uses a configured fallback on unavailability", async () => {
     const h = setup(), b = await h.agent("Backup"), a = await h.agent("Primary", alice, { fallback: b.id }), space = await h.space();
     await h.post(space, a); await h.call("heartbeat", { agent: a.id, device: a.device, ready: false, detail: "CLI unavailable" });
+    expect((await h.claim(b)).job).toBeNull(); await h.approve(b);
     const job = await h.claim(b); expect(job.job.agent).toBe(b.id); expect(job.prompt).toContain("CLI unavailable");
   });
   it("prevents fallback cycles and cross-owner escalation", async () => {
@@ -133,11 +141,12 @@ describe("fallbacks, leases and write boundaries", () => {
     const s = await h.call<Snapshot>("sync"); expect(s.jobs).toHaveLength(1); expect(s.threads[0]?.status).toBe("error");
     expect(s.messages.at(-1)?.content).toContain("Изменения могли");
   });
-  it("allows fallback before write execution starts", async () => {
+  it("requires a separate owner write request even for fallback before execution starts", async () => {
     const h = setup(), b = await h.agent("Backup", alice, { allowWrite: true }), a = await h.agent("Writer", alice, { allowWrite: true, fallback: b.id }), space = await h.space();
     await h.post(space, a, { mode: "write" }); const { job } = await h.claim(a);
     await h.call("fail", { job: job.id, lease: job.lease, device: a.device, error: "Preflight failed" });
-    expect((await h.claim(b)).job.mode).toBe("write");
+    expect((await h.claim(b)).job).toBeNull();
+    expect((await h.call<Snapshot>("sync")).messages.at(-1)?.content).toContain("отдельный запрос владельца");
   });
   it("does not let a coworker authorize another employee's writes", async () => {
     const h = setup(), a = await h.agent("Writer", bob, { allowWrite: true }), space = await h.space(); await h.post(space, a, { mode: "write" });
@@ -145,10 +154,10 @@ describe("fallbacks, leases and write boundaries", () => {
   });
   it("never propagates write authorization along an agent handoff", async () => {
     const h = setup(), a = await h.agent("Writer", alice, { allowWrite: true }), b = await h.agent("Peer", bob, { allowWrite: true }), space = await h.space(); await h.post(space, a, { mode: "write" }); const { job } = await h.claim(a);
-    await h.complete(a, job, `Review diff\nROUTE: agent:${b.id}`); expect((await h.claim(b, bob)).job.mode).toBe("read");
+    await h.complete(a, job, `Review diff\nROUTE: agent:${b.id}`); await h.approve(b, bob); expect((await h.claim(b, bob)).job.mode).toBe("read");
   });
   it("cancels work on stop or membership removal and rejects a late answer", async () => {
-    const h = setup(), a = await h.agent("A", bob), space = await h.space(); await h.post(space, a); const { job } = await h.claim(a, bob);
+    const h = setup(), a = await h.agent("A", bob), space = await h.space(); await h.post(space, a); await h.approve(a, bob); const { job } = await h.claim(a, bob);
     await h.call("members", { space: space.id, members: [] });
     expect(await h.call("lease", { job: job.id, lease: job.lease, device: a.device }, bob)).toEqual({ cancelled: true });
     await expect(h.complete(a, job, "late\nROUTE: done", bob)).rejects.toThrow("остановлено");
@@ -178,6 +187,7 @@ describe("shared thread context", () => {
     const memory = { through: plan.through, sourceHash: plan.sourceHash, summary: "Contract proposal remains unapproved.", citations: [plan.ids[0]] };
     const complete = { job: first.job.id, lease: first.job.lease, device: a.device, content: `Review\nROUTE: agent:${b.id}`, memory };
     await h.call("complete", complete); await h.call("complete", complete);
+    await h.approve(b);
     const next = await h.call<{ context: ContextPacket }>("claim", { agent: b.id, device: b.device, contextVersion: 1 });
     expect(next.context.memory?.summary).toBe(memory.summary);
     expect(next.context.messages.some((m) => m.content.includes("Proposed contract 0"))).toBe(true);
@@ -202,6 +212,7 @@ describe("shared thread context", () => {
     await h.call("complete", { job: job.id, lease: job.lease, device: a.device, content: `Next\nROUTE: agent:${b.id}`,
       memory: { summary: "Forged", through: "other-thread", sourceHash: "bad", citations: [] },
       contextStats: { historyChars: 40000, promptChars: 20000, summaryInputChars: 30000, summaryOutputChars: 0, memoryReused: false, compacted: false } });
+    await h.approve(b);
     const next = await h.call<{ context: ContextPacket }>("claim", { agent: b.id, device: b.device, contextVersion: 1 });
     expect(next.context.memory).toBeUndefined(); expect(next.context.skipCompaction).toBe(true); expect(compactionPlan(next.context)).toBeUndefined();
   });
