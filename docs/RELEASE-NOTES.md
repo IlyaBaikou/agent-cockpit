@@ -1,4 +1,10 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.9.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.10.
+
+New in 0.2.10:
+
+- The recipient picker no longer offers your own employee profile: mentioning yourself cannot notify anyone useful. Existing self mentions in history remain readable but cannot be inserted by clicking.
+- Recipients are grouped as other employees, their enabled agents, then your enabled agents. Filtering preserves this priority and stable order; colleagues with the same display name remain distinct by ID. Own agents remain available in solo spaces.
+- This is a desktop-only UI update compatible with coordinator 0.2.8/0.2.9. It changes neither space membership nor routing permissions, and needs no server deployment or data migration.
 
 New in 0.2.9:
 

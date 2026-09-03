@@ -357,9 +357,12 @@ function renderChat() {
 
 function mentionOptions() {
   const members = currentSpace()?.members ?? [];
+  // Keep the hub's order within each group without mutating its snapshot.
+  const agents = data.agents.filter((a) => members.includes(a.owner) && a.enabled)
+    .sort((a, b) => Number(a.owner === data.me.id) - Number(b.owner === data.me.id));
   return [
-    ...data.employees.filter((e) => members.includes(e.id)).map((e) => ({ id: e.id, kind: "u", title: e.name, insert: `@«${e.name}»`, sub: "Сотрудник · отправить уведомление" })),
-    ...data.agents.filter((a) => members.includes(a.owner) && a.enabled).map((a) => ({ id: a.id, kind: "a", title: a.name, insert: `@«${name(a.owner)} / ${a.name}»`, sub: `${name(a.owner)} · ${a.executor} · ${a.ready ? "готов" : "не в сети"}` })),
+    ...data.employees.filter((e) => e.id !== data.me.id && members.includes(e.id)).map((e) => ({ id: e.id, kind: "u", title: e.name, insert: `@«${e.name}»`, sub: "Сотрудник · отправить уведомление" })),
+    ...agents.map((a) => ({ id: a.id, kind: "a", title: a.name, insert: `@«${name(a.owner)} / ${a.name}»`, sub: `${name(a.owner)} · ${a.executor} · ${a.ready ? "готов" : "не в сети"}` })),
   ];
 }
 function hideMentions() {

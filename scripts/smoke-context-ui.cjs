@@ -37,6 +37,36 @@ app.whenReady().then(async () => {
       return { humans: true, agents: true, examplesIgnored: true, noAutomaticSend: true };
     })()`);
     console.log(JSON.stringify({ mentions }));
+    const mentionOrdering = await window.webContents.executeJavaScript(`(() => {
+      const check = (v, why) => { if (!v) throw new Error(why); };
+      const saved = structuredClone(data), fixture = document.createElement('div');
+      const ids = () => mentionOptions().map(o => o.kind + ':' + o.id).join(',');
+      try {
+        check(ids() === 'u:peer,a:b,a:a', 'Colleagues, peer agents, own agents; no self profile');
+        data.employees.push({ id: 'peer2', name: data.me.name }, { id: 'outside', name: 'Outside' });
+        const space = currentSpace(); space.members.push('peer2');
+        data.agents.unshift(
+          { id: 'own2', owner: 'owner', name: 'Own offline', executor: 'claude', enabled: true, ready: false },
+          { id: 'disabled', owner: 'peer', name: 'Disabled', executor: 'claude', enabled: false, ready: true },
+          { id: 'external', owner: 'outside', name: 'External', executor: 'codex', enabled: true, ready: true }
+        );
+        data.agents.push({ id: 'peer-agent2', owner: 'peer2', name: 'Peer offline', executor: 'codex', enabled: true, ready: false });
+        const orderBefore = JSON.stringify({ employees: data.employees, agents: data.agents });
+        check(ids() === 'u:peer,u:peer2,a:b,a:peer-agent2,a:own2,a:a', 'Group order is stable and excludes disabled / out-of-space agents');
+        check(JSON.stringify({ employees: data.employees, agents: data.agents }) === orderBefore, 'Picker must not reorder shared snapshot arrays');
+        check(mentionOptions().some(o => o.id === 'peer2' && o.kind === 'u'), 'A colleague with the same display name must remain selectable');
+        check(mentionOptions().filter(o => (o.title + ' ' + o.sub).toLowerCase().includes('offline')).map(o => o.id).join(',') === 'peer-agent2,own2', 'Filtering retains peer-before-own order even for offline agents');
+        fixture.innerHTML = markdown('@{u:owner} @{u:peer} @{a:a}');
+        check(!fixture.querySelector('[data-mention-id="owner"]') && fixture.querySelector('.mention').textContent === '@Alex', 'Existing self mentions stay readable but cannot insert a self mention');
+        check(fixture.querySelector('[data-mention-id="peer"]') && fixture.querySelector('[data-mention-id="a"]'), 'Colleague and own-agent mention chips stay interactive');
+        space.members = ['owner'];
+        check(ids() === 'a:own2,a:a', 'Solo spaces still allow calling own agents');
+        data.agents.forEach(a => { if (a.owner === 'owner') a.enabled = false; });
+        check(mentionOptions().length === 0, 'Solo space without enabled agents has no self fallback');
+        return { grouped: true, selfHidden: true, sameNamePeer: true, scoped: true, stable: true, solo: true, historyPreserved: true };
+      } finally { data = saved; fixture.remove(); }
+    })()`);
+    console.log('MENTION_ORDER_UI_SMOKE_OK', mentionOrdering);
     const mentionKeyboard = await window.webContents.executeJavaScript(`(async () => {
       const check = (v, why) => { if (!v) throw new Error(why); };
       navigate('demo-space', 'demo-thread');
@@ -48,10 +78,10 @@ app.whenReady().then(async () => {
       check(input.getAttribute('aria-expanded') === 'true' && picker.querySelector('[aria-selected="true"]').dataset.index === '0', 'First mention should be highlighted');
       check(key('ArrowDown').defaultPrevented && picker.querySelector('.active').dataset.index === '1', 'Down selects next recipient without moving caret');
       key('ArrowUp'); check(picker.querySelector('.active').dataset.index === '0', 'Up selects previous recipient');
-      key('ArrowUp'); check(picker.querySelector('.active').dataset.index === '3', 'Up wraps to final recipient');
+      key('ArrowUp'); check(picker.querySelector('.active').dataset.index === '2', 'Up wraps to own agent at the end');
       key('Enter');
-      check(input.value === '@«Sam / Frontend Claude» ' && picker.classList.contains('hidden') && !input.hasAttribute('aria-activedescendant'), 'Enter inserts recipient and closes picker immediately');
-      check(encodeMentions(input.value) === '@{a:b} ', 'Selected peer identity preserved');
+      check(input.value === '@«Alex / Backend Codex» ' && picker.classList.contains('hidden') && !input.hasAttribute('aria-activedescendant'), 'Enter inserts own agent and closes picker immediately');
+      check(encodeMentions(input.value) === '@{a:a} ', 'Selected own-agent identity preserved after reordering');
       type('До @fro после', 7); key('Enter', { ctrlKey: true });
       check(input.value === 'До @«Sam / Frontend Claude»  после', 'Filtered keyboard choice must preserve suffix, even with Ctrl+Enter');
       type('@sam'); check(picker.querySelectorAll('[role="option"]').length === 2 && picker.querySelector('.active').dataset.index === '0', 'Filtering resets active index');
@@ -60,7 +90,7 @@ app.whenReady().then(async () => {
       check(input.value === '@no-such-recipient' && picker.classList.contains('hidden'), 'Empty results must not insert or send');
       type('@'); key('Enter', { isComposing: true }); check(!picker.classList.contains('hidden') && input.value === '@', 'IME composition must not select or send');
       key('Tab'); check(picker.classList.contains('hidden'), 'Tab closes picker');
-      type('@'); picker.querySelector('[data-index="1"]').click();
+      type('@'); picker.querySelector('[data-index="0"]').click();
       check(input.value === '@«Sam» ' && picker.classList.contains('hidden'), 'Mouse choice still closes picker');
       type('@'); document.getElementById('chat-title').dispatchEvent(new Event('pointerdown', { bubbles: true }));
       check(picker.classList.contains('hidden'), 'Outside click closes picker');
