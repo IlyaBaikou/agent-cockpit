@@ -46,13 +46,16 @@ app.whenReady().then(async () => {
         data.employees.push({ id: 'peer2', name: data.me.name }, { id: 'outside', name: 'Outside' });
         const space = currentSpace(); space.members.push('peer2');
         data.agents.unshift(
-          { id: 'own2', owner: 'owner', name: 'Own offline', executor: 'claude', enabled: true, ready: false },
+          { id: 'own2', owner: 'owner', name: 'Own offline', executor: 'claude', enabled: true, ready: false, primary: true },
           { id: 'disabled', owner: 'peer', name: 'Disabled', executor: 'claude', enabled: false, ready: true },
           { id: 'external', owner: 'outside', name: 'External', executor: 'codex', enabled: true, ready: true }
         );
-        data.agents.push({ id: 'peer-agent2', owner: 'peer2', name: 'Peer offline', executor: 'codex', enabled: true, ready: false });
+        data.agents.find(a => a.id === 'a').primary = false;
+        data.agents.push({ id: 'peer-aux', owner: 'peer', name: 'Peer auxiliary', executor: 'codex', enabled: true, ready: true });
+        data.agents.push({ id: 'peer-agent2', owner: 'peer2', name: 'Peer offline', executor: 'codex', enabled: true, ready: false, primary: true });
         const orderBefore = JSON.stringify({ employees: data.employees, agents: data.agents });
-        check(ids() === 'u:peer,u:peer2,a:b,a:peer-agent2,a:own2,a:a', 'Group order is stable and excludes disabled / out-of-space agents');
+        check(ids() === 'u:peer,u:peer2,a:b,a:peer-agent2,a:own2,a:a', 'Picker exposes one default per colleague, then own agents with the default first');
+        check(!mentionOptions().some(o => o.id === 'peer-aux'), 'A colleague auxiliary agent must not be directly selectable');
         check(JSON.stringify({ employees: data.employees, agents: data.agents }) === orderBefore, 'Picker must not reorder shared snapshot arrays');
         check(mentionOptions().some(o => o.id === 'peer2' && o.kind === 'u'), 'A colleague with the same display name must remain selectable');
         check(mentionOptions().filter(o => (o.title + ' ' + o.sub).toLowerCase().includes('offline')).map(o => o.id).join(',') === 'peer-agent2,own2', 'Filtering retains peer-before-own order even for offline agents');
@@ -63,7 +66,7 @@ app.whenReady().then(async () => {
         check(ids() === 'a:own2,a:a', 'Solo spaces still allow calling own agents');
         data.agents.forEach(a => { if (a.owner === 'owner') a.enabled = false; });
         check(mentionOptions().length === 0, 'Solo space without enabled agents has no self fallback');
-        return { grouped: true, selfHidden: true, sameNamePeer: true, scoped: true, stable: true, solo: true, historyPreserved: true };
+        return { grouped: true, automaticPeerDefault: true, ownDefaultFirst: true, selfHidden: true, sameNamePeer: true, scoped: true, stable: true, solo: true, historyPreserved: true };
       } finally { data = saved; fixture.remove(); }
     })()`);
     console.log('MENTION_ORDER_UI_SMOKE_OK', mentionOrdering);

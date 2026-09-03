@@ -5,6 +5,7 @@ export type Employee = { id: string; name: string };
 export type Agent = {
   id: string; owner: string; name: string; description: string; executor: Executor;
   device: string; enabled: boolean; allowWrite: boolean; fallback: string | null;
+  primary?: boolean;
   seenAt: number; ready: boolean; detail: string;
   diagnostic?: AgentDiagnostic;
 };

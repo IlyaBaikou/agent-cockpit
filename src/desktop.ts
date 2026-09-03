@@ -90,6 +90,7 @@ async function load(): Promise<void> {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Не удалось прочитать защищённые настройки. Оригинал сохранён; восстановите доступ к хранилищу ключей ОС.");
   }
   if (!["system", "light", "dark"].includes(settings.theme)) settings.theme = "system";
+  if (settings.agents.length && !settings.agents.some((agent) => agent.primary)) settings.agents[0]!.primary = true;
   nativeTheme.themeSource = settings.theme;
   // Explicit migration only; the installer never searches for or copies credentials.
   const index = process.argv.indexOf("--import-legacy");
@@ -195,10 +196,11 @@ function handlers(): void {
     requireValue((await stat(directory)).isDirectory(), "Выберите рабочую папку");
     requireValue(["codex", "claude", "cursor"].includes(input.executor), "Неизвестный исполнитель");
     const id = input.id || randomUUID();
-    const agent: LocalAgent = { id, name: field(input.name, "Имя", 80), description: String(input.description ?? "").slice(0, 2000), directory, binary: String(input.binary ?? "").trim(), executor: input.executor, enabled: input.enabled === true, allowWrite: input.allowWrite === true, fallback: input.fallback || null };
-    await client.call<Agent>("agent", { ...agent, device: settings.device, directory: undefined, binary: undefined });
+    const agent: LocalAgent = { id, name: field(input.name, "Имя", 80), description: String(input.description ?? "").slice(0, 2000), directory, binary: String(input.binary ?? "").trim(), executor: input.executor, enabled: input.enabled === true, allowWrite: input.allowWrite === true, fallback: input.fallback || null, primary: input.primary === true };
+    const registered = await client.call<Agent>("agent", { ...agent, device: settings.device, directory: undefined, binary: undefined });
+    agent.primary = registered.primary === true;
     runners.get(id)?.stop(); runners.delete(id);
-    settings.agents = [...settings.agents.filter((a) => a.id !== id), agent]; await save(); await sync(true); return agent;
+    settings.agents = [...settings.agents.filter((a) => a.id !== id).map((a) => registered.primary ? { ...a, primary: false } : a), agent]; await save(); await sync(true); return agent;
   });
   register("hub:check", async (input: LocalAgent) => {
     requireValue(["codex", "claude", "cursor"].includes(input.executor), "Неизвестный исполнитель");

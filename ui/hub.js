@@ -170,9 +170,11 @@ function renderSidebar() {
   const unread = unreadMessages();
   $("spaces").innerHTML = data.spaces.map((s) => `<button class="space-button ${s.id === spaceId ? "active" : ""}" data-space="${s.id}"><span>#</span><span class="space-title">${esc(s.name)}</span>${badge(unread.filter((m) => m.space === s.id).length)}</button>`).join("");
   $("spaces").querySelectorAll("[data-space]").forEach((b) => b.onclick = () => navigate(b.dataset.space, null));
-  $("my-agents").innerHTML = data.agents.filter((a) => a.owner === data.me.id).map((a) => {
+  const primary = primaryAgent(data.me.id);
+  $("my-agents").innerHTML = data.agents.filter((a) => a.owner === data.me.id)
+    .sort((a, b) => Number(b.id === primary?.id) - Number(a.id === primary?.id)).map((a) => {
     const busy = data.jobs.some((j) => j.agent === a.id && j.status === "running");
-    return `<button class="agent-nav" data-agent="${a.id}"><i class="dot ${busy ? "busy" : a.ready && a.enabled ? "ready" : ""}"></i><span>${esc(a.name)}<small>${a.executor} · ${!a.enabled ? "отключён" : busy ? "работает" : a.ready ? "готов" : "не в сети"}</small></span></button>`;
+    return `<button class="agent-nav" data-agent="${a.id}"><i class="dot ${busy ? "busy" : a.ready && a.enabled ? "ready" : ""}"></i><span>${esc(a.name)}<small>${a.id === primary?.id ? "по умолчанию · " : ""}${a.executor} · ${!a.enabled ? "отключён" : busy ? "работает" : a.ready ? "готов" : "не в сети"}</small></span></button>`;
   }).join("") || '<p class="hint">Подключите первого агента через +</p>';
   $("my-agents").querySelectorAll("[data-agent]").forEach((b) => b.onclick = () => editAgent(b.dataset.agent));
   $("inbox-count").textContent = data.notices.filter((n) => !n.read).length || "";
@@ -355,14 +357,23 @@ function renderChat() {
   scheduleRead();
 }
 
+function primaryAgent(owner) {
+  const owned = data?.agents.filter((a) => a.owner === owner) ?? [];
+  return owned.find((a) => a.primary) ?? owned[0];
+}
 function mentionOptions() {
   const members = currentSpace()?.members ?? [];
-  // Keep the hub's order within each group without mutating its snapshot.
-  const agents = data.agents.filter((a) => members.includes(a.owner) && a.enabled)
-    .sort((a, b) => Number(a.owner === data.me.id) - Number(b.owner === data.me.id));
+  const colleagues = data.employees.filter((e) => e.id !== data.me.id && members.includes(e.id));
+  const peerAgents = colleagues.map((employee) => primaryAgent(employee.id)).filter((agent) => agent?.enabled);
+  const ownPrimary = primaryAgent(data.me.id);
+  // Colleagues do not choose between another employee's local executors. They
+  // address that employee's default; owners retain explicit access to all of theirs.
+  const ownAgents = data.agents.filter((a) => a.owner === data.me.id && a.enabled)
+    .sort((a, b) => Number(b.id === ownPrimary?.id) - Number(a.id === ownPrimary?.id));
   return [
-    ...data.employees.filter((e) => e.id !== data.me.id && members.includes(e.id)).map((e) => ({ id: e.id, kind: "u", title: e.name, insert: `@«${e.name}»`, sub: "Сотрудник · отправить уведомление" })),
-    ...agents.map((a) => ({ id: a.id, kind: "a", title: a.name, insert: `@«${name(a.owner)} / ${a.name}»`, sub: `${name(a.owner)} · ${a.executor} · ${a.ready ? "готов" : "не в сети"}` })),
+    ...colleagues.map((e) => ({ id: e.id, kind: "u", title: e.name, insert: `@«${e.name}»`, sub: "Сотрудник · отправить уведомление" })),
+    ...peerAgents.map((a) => ({ id: a.id, kind: "a", title: a.name, insert: `@«${name(a.owner)} / ${a.name}»`, sub: `${name(a.owner)} · агент по умолчанию · ${a.ready ? "готов" : "не в сети"}` })),
+    ...ownAgents.map((a) => ({ id: a.id, kind: "a", title: a.name, insert: `@«${name(a.owner)} / ${a.name}»`, sub: `Ваш агент${a.id === ownPrimary?.id ? " · по умолчанию" : ""} · ${a.executor} · ${a.ready ? "готов" : "не в сети"}` })),
   ];
 }
 function hideMentions() {
@@ -500,8 +511,10 @@ $("add-agent").onclick = () => editAgent();
 function editAgent(id) {
   const agent = appState.settings.agents.find((a) => a.id === id);
   if (id && !agent) return toast("Этот агент настроен на другом компьютере владельца.");
-  openModal(agent ? `Настройки · ${agent.name}` : "Подключить агента", `<form id="agent-form"><div class="agent-editor-header"><label>Имя агента<input id="agent-name" required maxlength="80" value="${esc(agent?.name ?? "")}" placeholder="Например: Backend reviewer"></label><label>Исполнитель<select id="agent-executor">${["codex", "claude", "cursor"].map((p) => `<option value="${p}" ${agent?.executor === p ? "selected" : ""}>${p === "claude" ? "Claude Code" : p === "cursor" ? "Cursor CLI" : "Codex"}</option>`).join("")}</select></label></div><label>Рабочая папка<div class="row"><input id="agent-directory" required value="${esc(agent?.directory ?? "")}" placeholder="Папка проекта или документов"><button type="button" id="choose-directory">Выбрать</button></div></label><label>Описание и контекст<textarea id="agent-description" rows="3" placeholder="С чем работает агент, какие вопросы ему адресовать">${esc(agent?.description ?? "")}</textarea></label><label>Резервный агент<select id="agent-fallback"><option value="">Не назначен — показать ошибку в треде</option>${appState.settings.agents.filter((a) => a.id !== id).map((a) => `<option value="${a.id}" ${agent?.fallback === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select></label><details><summary class="hint">Путь к исполняемому файлу CLI (если не найден автоматически)</summary><label><div class="row"><input id="agent-binary" value="${esc(agent?.binary ?? "")}" placeholder="Автоматически"><button type="button" id="choose-binary">Выбрать</button></div></label></details><label class="check"><input id="agent-enabled" type="checkbox" ${agent?.enabled !== false ? "checked" : ""}> Разрешить участникам спейсов запрашивать участие агента</label><label class="check"><input id="agent-write" type="checkbox" ${agent?.allowWrite ? "checked" : ""}> Разрешить мне запускать изменения в отдельной Git-копии</label><p class="hint">Чужие обращения и автоматические передачи требуют вашего разрешения на 1 или 3 задачи в треде. Резервному агенту нужно отдельное разрешение. Сохранение настроек отзывает текущие разрешения. Вход в аккаунт — через установленный CLI. Обсуждения и ответы передаются провайдеру агента и участникам спейса. Для изменений нужен Git-репозиторий. Push, merge и деплой приложение не выполняет. CLI-интеграции и их разрешения настраиваются отдельно.</p><p id="agent-health" class="inline-state"></p><div class="modal-actions"><button id="check-agent" type="button" class="quiet">Проверить подключение</button><button class="primary">Сохранить агента</button></div></form>`);
-  const input = () => ({ id: agent?.id ?? "", name: $("agent-name").value, executor: $("agent-executor").value, directory: $("agent-directory").value, description: $("agent-description").value, binary: $("agent-binary").value, fallback: $("agent-fallback").value || null, enabled: $("agent-enabled").checked, allowWrite: $("agent-write").checked });
+  const defaultAgent = primaryAgent(data.me.id), isPrimary = agent ? defaultAgent?.id === agent.id : !defaultAgent;
+  const localAgents = appState.settings.agents.slice().sort((a, b) => Number(b.id === defaultAgent?.id) - Number(a.id === defaultAgent?.id));
+  openModal(agent ? `Настройки · ${agent.name}` : "Подключить агента", `<form id="agent-form"><div class="agent-editor-header"><label>Имя агента<input id="agent-name" required maxlength="80" value="${esc(agent?.name ?? "")}" placeholder="Например: Backend reviewer"></label><label>Исполнитель<select id="agent-executor">${["codex", "claude", "cursor"].map((p) => `<option value="${p}" ${agent?.executor === p ? "selected" : ""}>${p === "claude" ? "Claude Code" : p === "cursor" ? "Cursor CLI" : "Codex"}</option>`).join("")}</select></label></div><label>Рабочая папка<div class="row"><input id="agent-directory" required value="${esc(agent?.directory ?? "")}" placeholder="Папка проекта или документов"><button type="button" id="choose-directory">Выбрать</button></div></label><label>Описание и контекст<textarea id="agent-description" rows="3" placeholder="С чем работает агент, какие вопросы ему адресовать">${esc(agent?.description ?? "")}</textarea></label><label class="check"><input id="agent-primary" type="checkbox" ${isPrimary ? "checked" : ""} ${isPrimary && agent ? "disabled" : ""}> Агент по умолчанию для входящих обращений</label>${isPrimary && agent ? '<p class="hint">Чтобы сменить агента по умолчанию, откройте другой агент и включите этот пункт.</p>' : ''}<label>Резервный агент<select id="agent-fallback"><option value="">Не назначен — показать ошибку в треде</option>${localAgents.filter((a) => a.id !== id).map((a) => `<option value="${a.id}" ${agent?.fallback === a.id ? "selected" : ""}>${esc(a.name)}${a.id === defaultAgent?.id ? " · по умолчанию" : ""}</option>`).join("")}</select></label><details><summary class="hint">Путь к исполняемому файлу CLI (если не найден автоматически)</summary><label><div class="row"><input id="agent-binary" value="${esc(agent?.binary ?? "")}" placeholder="Автоматически"><button type="button" id="choose-binary">Выбрать</button></div></label></details><label class="check"><input id="agent-enabled" type="checkbox" ${agent?.enabled !== false ? "checked" : ""}> Разрешить участникам спейсов запрашивать участие агента</label><label class="check"><input id="agent-write" type="checkbox" ${agent?.allowWrite ? "checked" : ""}> Разрешить мне запускать изменения в отдельной Git-копии</label><p class="hint">Коллеги и их агенты видят одно агентское обращение к вам: хаб направляет его агенту по умолчанию. Настроенный резерв включается только при недоступности основного. Чужие обращения и автоматические передачи требуют вашего разрешения на 1 или 3 задачи в треде. Резервному агенту нужно отдельное разрешение. Сохранение настроек отзывает текущие разрешения. Вход в аккаунт — через установленный CLI. Обсуждения и ответы передаются провайдеру агента и участникам спейса. Для изменений нужен Git-репозиторий. Push, merge и деплой приложение не выполняет. CLI-интеграции и их разрешения настраиваются отдельно.</p><p id="agent-health" class="inline-state"></p><div class="modal-actions"><button id="check-agent" type="button" class="quiet">Проверить подключение</button><button class="primary">Сохранить агента</button></div></form>`);
+  const input = () => ({ id: agent?.id ?? "", name: $("agent-name").value, executor: $("agent-executor").value, directory: $("agent-directory").value, description: $("agent-description").value, binary: $("agent-binary").value, fallback: $("agent-fallback").value || null, primary: $("agent-primary").checked, enabled: $("agent-enabled").checked, allowWrite: $("agent-write").checked });
   $("choose-directory").onclick = async () => { const path = await window.hub.directory(); if (path) $("agent-directory").value = path; };
   $("choose-binary").onclick = async () => { const path = await window.hub.binary(); if (path) $("agent-binary").value = path; };
   $("check-agent").onclick = () => void safely(async () => {

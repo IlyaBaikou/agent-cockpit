@@ -14,6 +14,7 @@ import { contextFiles, promptArgument } from "./context-files.js";
 export type LocalAgent = {
   id: string; name: string; description: string; executor: Executor; directory: string;
   binary: string; enabled: boolean; allowWrite: boolean; fallback: string | null;
+  primary?: boolean;
 };
 export function adapterFor(agent: Pick<LocalAgent, "executor" | "binary">): AgentAdapter {
   const options = agent.binary ? { binary: agent.binary } : {};

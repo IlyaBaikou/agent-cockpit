@@ -1,4 +1,11 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.11.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.12.
+
+New in 0.2.12:
+
+- Every employee now has one default agent. The first configured agent is the backward-compatible default; the owner can promote another agent from its settings. The owner sidebar and own-agent mention suggestions put that default first and label it.
+- Coworkers still see two distinct address types: the employee mention only sends a notification, while the separate agent mention invokes the employee's default agent. They no longer choose among that employee's local executors or auxiliary agents.
+- Agent-to-agent directories expose one default peer agent per employee. Configured fallback remains an internal execution path when the default executor is unavailable; consent, write restrictions and the existing fallback grant remain unchanged.
+- Deploy the coordinator before updating desktops so the selected default is shared across devices. Existing records need no destructive migration: until an owner selects another default, their first legacy agent is used deterministically.
 
 New in 0.2.11:
 

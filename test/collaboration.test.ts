@@ -39,7 +39,7 @@ describe("employee-owned agents and shared spaces", () => {
   it("tags and notifies human recipients once, even if they also follow the thread", async () => {
     const h = setup(), a = await h.agent("A"), space = await h.space();
     const { thread } = await h.post(space, a); const first = await h.claim(a);
-    expect(first.prompt).toContain("mention @{u:Bob}"); expect(first.prompt).toContain(`mention @{a:${a.id}}`);
+    expect(first.prompt).toContain("mention @{u:Bob}"); expect(first.prompt).toContain(`Your agent ID is ${a.id}`);
     await h.call("thread-subscription", { thread: thread.id, following: true }, bob);
     const before = (await h.call<Snapshot>("sync", {}, bob)).sequence;
     await h.complete(a, first.job, "Approve?\nROUTE: human:Bob");
@@ -115,6 +115,21 @@ describe("employee-owned agents and shared spaces", () => {
     await h.complete(b, second.job, "Agreed\nROUTE: done", bob);
     const s = await h.call<Snapshot>("sync"); expect(s.threads[0]?.status).toBe("resolved");
     expect(s.messages.filter((m) => m.kind === "agent").map((m) => m.author)).toEqual([a.id, b.id]);
+  });
+  it("keeps one owner-selected default agent and offers only peer defaults to agents", async () => {
+    const h = setup(), first = await h.agent("First"), second = await h.agent("Second"), peerDefault = await h.agent("Peer default", bob), peerAux = await h.agent("Peer aux", bob);
+    expect(first.primary).toBe(true); expect(second.primary).toBe(false);
+    const promoted = await h.call<Agent>("agent", { ...second, primary: true });
+    expect(promoted.primary).toBe(true);
+    await h.call("heartbeat", { agent: second.id, device: second.device, ready: true });
+    const own = await h.call<Snapshot>("sync");
+    expect(own.agents.find((a) => a.id === first.id)?.primary).toBe(false);
+    expect(own.agents.find((a) => a.id === second.id)?.primary).toBe(true);
+    const space = await h.space();
+    const next = await h.post(space, second); const claimed = await h.claim(second);
+    expect(claimed.prompt).toContain(`Peer default [${peerDefault.id}]`);
+    expect(claimed.prompt).not.toContain(`Peer aux [${peerAux.id}]`);
+    expect(next.thread.id).toBeTruthy();
   });
   it("keeps private spaces private and disallows outsiders in mentions", async () => {
     const h = setup(), space = await h.space([]), b = await h.agent("Foreign", bob);
