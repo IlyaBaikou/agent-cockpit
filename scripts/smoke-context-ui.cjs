@@ -69,6 +69,23 @@ app.whenReady().then(async () => {
       return { arrows: true, wrap: true, enter: true, escape: true, filtered: true, mouse: true, composition: true, noSend: true };
     })()`);
     console.log('MENTION_KEYBOARD_UI_SMOKE_OK', mentionKeyboard);
+    const notificationProbe = await window.webContents.executeJavaScript(`(async () => {
+      const check = (v, why) => { if (!v) throw new Error(why); };
+      document.getElementById('settings').click();
+      const wait = async () => { for (let i=0;i<50;i++) { if (!document.getElementById('notification-test').disabled) return; await new Promise(r=>setTimeout(r,20)); } throw Error('Notification UI wait timed out'); };
+      const button = document.getElementById('notification-test'), output = document.getElementById('notification-status');
+      await window.hub.testConfigureNotification({ delayMs: 100, fail: true });
+      button.click(); button.click();
+      check(button.disabled && button.textContent.includes('Ждём'), 'Probe must wait and prevent duplicate tests');
+      await wait(); check(output.textContent.includes('invalid signature') && !output.querySelector('img'), 'Native failure must be visible and escaped');
+      check((await window.hub.testCalls()).filter(c=>c.op==='notification-test').length === 1, 'Double click must not send two notifications');
+      await window.hub.testConfigureNotification({ unconfirmed: true }); button.click(); await wait();
+      check(output.textContent.includes('не подтверждена'), 'Timeout must not claim delivery');
+      await window.hub.testConfigureNotification({}); button.click(); await wait();
+      check(output.textContent.includes('Система приняла'), 'Success requires acknowledgement');
+      closeModal(); return { failure: true, timeout: true, acknowledged: true, deduplicated: true };
+    })()`);
+    console.log('NOTIFICATION_PROBE_UI_SMOKE_OK', notificationProbe);
     if (process.argv[2]) {
       await window.webContents.executeJavaScript(`(() => { const input = document.getElementById('composer'); input.value = '@'; input.focus(); input.setSelectionRange(1, 1); showMentions(); highlightMention(1); })()`);
       await new Promise((resolve) => setTimeout(resolve, 120));

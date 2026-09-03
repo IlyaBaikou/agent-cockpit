@@ -518,7 +518,19 @@ $("settings").onclick = () => {
   applyTheme();
   $("profile-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { await window.hub.call("profile", { name: $("profile-name").value }); toast("Имя сохранено"); }); };
   $("notifications-toggle").onchange = () => void safely(() => window.hub.preferences({ notifications: $("notifications-toggle").checked }));
-  $("notification-test").onclick = () => void safely(async () => { await window.hub.testNotification(); toast("Тест отправлен. Если баннера нет, проверьте разрешения Agent Hub в настройках уведомлений ОС."); });
+  const notificationStatus = document.createElement('p'); notificationStatus.id = 'notification-status'; notificationStatus.className = 'hint'; notificationStatus.setAttribute('role', 'status');
+  notificationStatus.textContent = appState.health?.notifications?.detail ?? 'Тест проверит ответ системы. Разрешение и показ баннеров управляются настройками macOS / Windows.';
+  $('notification-test').after(notificationStatus);
+  $('notification-test').disabled = appState.notificationsSupported === false;
+  $('notification-test').onclick = async () => {
+    const button = $('notification-test'), output = $('notification-status');
+    if (button.disabled) return;
+    button.disabled = true; button.textContent = 'Ждём ответ системы…'; button.setAttribute('aria-busy', 'true');
+    output.textContent = 'Отправляем тест. Если macOS спросит разрешение, выберите нужный вариант в системном окне.';
+    try { const result = await window.hub.testNotification(); output.textContent = result?.detail ?? 'Система не вернула результат проверки. Обновите приложение.'; }
+    catch (error) { output.textContent = errorText(error); }
+    finally { button.disabled = appState.notificationsSupported === false; button.textContent = 'Отправить тестовое уведомление'; button.setAttribute('aria-busy', 'false'); }
+  };
   $("open-invitations").onclick = () => openInvitations();
 };
 function openInvitations(selectedSpace = spaceId) {

@@ -12,7 +12,9 @@ Download a matching installer from [Releases](https://github.com/IlyaBaikou/agen
 
 The app does not need a source checkout, Node or npm. Paste a personal or shared team invitation. For a shared invitation, enter your name: the app creates your own account and opens the invited space. Install and log in to your preferred agent CLI separately, then choose a working directory for each agent.
 
-The first release is an **unsigned pilot**, not a company-wide production deployment. Follow your organization's approved installation process. Do not disable platform security policies. See [release notes](docs/RELEASE-NOTES.md) for limitations.
+These are **pilot builds**, not a company-wide production deployment. Since 0.2.9 the Mac app has a complete ad-hoc bundle signature (no Developer ID certificate or notarization); Windows installers remain unsigned. Follow your organization's approved installation process. Do not disable platform security policies. See [release notes](docs/RELEASE-NOTES.md) for limitations.
+
+On Mac, open the DMG and drag Agent Hub into **Applications**, then launch that copy. Settings → System notifications → Send test notification checks the OS response; approve the macOS request yourself if you want notifications. The app then appears in System Settings → Notifications → Agent Hub. An accepted request does not guarantee a banner if permissions, Focus or screen-sharing settings suppress it. A DMG is packaging, not a signature or proof of a trusted publisher; corporate policies may still block this pilot.
 
 ## Use
 

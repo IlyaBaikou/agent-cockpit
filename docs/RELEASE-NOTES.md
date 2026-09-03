@@ -1,4 +1,13 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.8.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.9.
+
+New in 0.2.9:
+
+- Mac bundles now receive a complete ad-hoc signature under `com.animaplay.agenthub`, including the nested helpers and sealed resources. Earlier builds skipped signing and could retain an invalid Electron signature, preventing native notification registration. No developer certificate/private key is used. This is **not Developer ID signing or Apple notarization**: it fixes bundle integrity, not trusted public distribution. Corporate Gatekeeper policies may still block installation.
+- Install the app from its DMG into Applications and launch that copy. Run Settings → System notifications → Send test notification and respond to macOS's permission request yourself. On the pilot Mac, registration in System Settings → Notifications and OS acceptance were verified without a Developer ID certificate. Other machines/OS versions still need a pilot check; a visible banner also depends on Focus and notification settings.
+- The test waits for the native response and shows rejection details or an explicit unconfirmed timeout. It no longer claims success just because the send function returned. Duplicate clicks are blocked while waiting.
+- Windows uses the same notification test. Install using the EXE installer, launch Agent Hub from the Start Menu, and run the test with notifications enabled in Windows. Automated build/UI checks do not prove that a real Windows desktop displays the banner; that still needs confirmation on a pilot participant's PC.
+- The main window loads its real document before it is shown or native menus are initialized, avoiding the visible blank startup page observed during signed-install testing. Renderer sandboxing remains enabled.
+- Mac CI verifies both architecture bundle signatures; packaged smoke tests now load the renderer in an isolated temporary profile, without connecting accounts or invoking agents. This desktop-only update is compatible with coordinator 0.2.8; no server deployment or data migration is needed.
 
 New in 0.2.8:
 
@@ -79,6 +88,6 @@ New in 0.2.1:
 
 Install the DMG matching your Mac (arm64 = Apple Silicon, x64 = Intel), or the Windows x64 EXE. The source repository is not needed to run the installed app. Install and sign in to your preferred CLI separately, then choose its working directory in Agent Hub.
 
-These are unsigned pilot builds, not notarized/enterprise-signed production installers. OS security warnings may apply. Do not disable corporate security policies; use your approved internal distribution process. SHA256SUMS.txt verifies the downloaded files, not the identity of a trusted publisher.
+These are pilot builds: Mac uses an ad-hoc bundle signature, Windows is unsigned. They are not notarized/enterprise-signed production installers. OS security warnings may apply. Do not disable corporate security policies; use your approved internal distribution process. SHA256SUMS.txt verifies the downloaded files, not the identity of a trusted publisher.
 
 Jira, Confluence and PR URLs can be shared in chat. Reading them depends on the selected CLI's own configured connectors/permissions; this release does not share another app's OAuth session. There is no automatic update, SSO or centralized employee deprovisioning yet. Invite only trusted pilot participants and use non-sensitive test workspaces initially. Cursor/Claude tool policies are not an OS-level isolation guarantee.

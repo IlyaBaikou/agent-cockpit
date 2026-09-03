@@ -17,7 +17,10 @@ mac:
   target:
     - target: dmg
       arch: [arm64, x64]
-  identity: null
+  # Pilot: seal the complete bundle without accessing a developer's certificate.
+  # Not Developer ID / notarization; never replace with null (skips bundle signing).
+  identity: '-'
+  notarize: false
 win:
   target:
     - target: nsis

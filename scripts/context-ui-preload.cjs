@@ -2,6 +2,7 @@
 const { contextBridge } = require("electron");
 const now = Date.now();
 let postBehavior = {};
+let notificationBehavior = {};
 const receipts = new Map();
 const me = { id: "owner", name: "Alex" };
 const snapshot = {
@@ -86,5 +87,12 @@ contextBridge.exposeInMainWorld("hub", {
   connect: async (input) => { calls.push({ op: "connect", input }); return state(); },
   testCalls: () => calls,
   testConfigurePost: (behavior) => { postBehavior = behavior; },
+  testConfigureNotification: (behavior) => { notificationBehavior = behavior; },
+  testNotification: async () => {
+    calls.push({ op: 'notification-test' }); const behavior = notificationBehavior;
+    if (behavior.delayMs) await new Promise(resolve => setTimeout(resolve, behavior.delayMs));
+    if (behavior.fail) throw new Error('Система отклонила уведомление: invalid signature <img src=x>');
+    return { status: behavior.unconfirmed ? 'unconfirmed' : 'accepted', detail: behavior.unconfirmed ? 'Доставка не подтверждена.' : 'Система приняла тестовое уведомление.' };
+  },
   testSetSnapshot: (value) => { Object.assign(snapshot, value); changed(state()); },
 });

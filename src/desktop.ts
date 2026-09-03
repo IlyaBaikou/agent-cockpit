@@ -2,9 +2,9 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nati
 import { AgentExecutionError, agentFailure, type AgentDiagnostic } from "./agents/diagnostics.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { CollaborationClient, hubUrl } from "./collab/client.js";
 import { EmployeeRunner, checkLocalAgent, type LocalAgent } from "./collab/runner.js";
 import { SqliteStateStore } from "./collab/store.js";
@@ -12,6 +12,7 @@ import { CollaborationService } from "./collab/service.js";
 import { collaborationHttp } from "./collab/http.js";
 import { field, requireValue, type Agent, type Snapshot } from "./collab/model.js";
 import { pendingNotices } from "./collab/notifications.js";
+import { probeNotification } from "./notification-probe.js";
 import { decodeInvitation, encodeInvitation } from "./collab/invitations.js";
 
 type Settings = {
@@ -42,6 +43,11 @@ process.env.PATH = [...new Set([
 ])].filter(Boolean).join(delimiter);
 app.setName("Agent Hub");
 app.setAppUserModelId("com.animaplay.agenthub");
+if (process.argv.includes("--smoke-test")) {
+  const smokeProfile = await mkdtemp(join(tmpdir(), "agent-hub-package-smoke-"));
+  app.setPath("userData", smokeProfile); app.setPath("sessionData", smokeProfile);
+  if (process.platform === "win32") app.disableHardwareAcceleration();
+}
 // Explicit development profile; never discover/copy a production profile.
 const profileIndex = process.argv.indexOf("--profile-dir");
 if (profileIndex >= 0) {
@@ -207,9 +213,15 @@ function handlers(): void {
     if (input.theme !== undefined) { settings.theme = input.theme; nativeTheme.themeSource = input.theme; }
     await save(); changed();
   });
-  register("hub:notification-test", () => {
+  register("hub:notification-test", async () => {
     requireValue(Notification.isSupported(), "Системные уведомления недоступны");
-    new Notification({ title: "Agent Hub", body: "Уведомления работают. Здесь будут упоминания, ответы и запросы решения." }).show();
+    try {
+      const result = await probeNotification(new Notification({ title: "Agent Hub", body: "Тестовое уведомление. Здесь будут упоминания, ответы и запросы решения." }));
+      health.set("notifications", { ready: result.status === "accepted", detail: result.detail }); changed();
+      return result;
+    } catch (error) {
+      health.set("notifications", { ready: false, detail: error instanceof Error ? error.message : String(error) }); changed(); throw error;
+    }
   });
   register("hub:invite", async (input: { kind: "personal" | "group"; name?: string; space?: string; days?: number; maxUses?: number }) => {
     requireValue(client && !settings.local, "Приглашения коллег доступны в удалённом хабе");
@@ -236,18 +248,21 @@ function handlers(): void {
 }
 
 async function createWindow(): Promise<void> {
-  window = new BrowserWindow({ width: 1440, height: 920, minWidth: 1080, minHeight: 700, title: "Agent Hub", backgroundColor: nativeTheme.shouldUseDarkColors ? "#171a27" : "#f6f7fb", webPreferences: { preload: join(app.getAppPath(), "dist/src/desktop-preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  window = new BrowserWindow({ show: false, width: 1440, height: 920, minWidth: 1080, minHeight: 700, title: "Agent Hub", backgroundColor: nativeTheme.shouldUseDarkColors ? "#171a27" : "#f6f7fb", webPreferences: { preload: join(app.getAppPath(), "dist/src/desktop-preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   window.on("close", (event) => { if (!quitting) { event.preventDefault(); window?.hide(); } });
   handlers();
+  // Commit the real document before showing a window or initializing native menus.
+  // A visible initial about:blank could race Electron's sandbox startup data.
+  await window.loadFile(join(app.getAppPath(), "ui/hub.html"));
   const icon = nativeImage.createFromDataURL("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAPUlEQVQ4T2NkoBAwUqifYdQABob/DP8ZGBgYRsQAkgxgYWBg+M/AwMDIyMjAYBaMFoAwNoBmgiEwGg0YBgYGABX6DBGTIWcAAAAASUVORK5CYII=");
   tray = new Tray(icon); tray.setToolTip("Agent Hub — агенты работают, пока приложение запущено");
   tray.setContextMenu(Menu.buildFromTemplate([{ label: "Открыть Agent Hub", click: show }, { label: "Выйти и остановить агентов", click: () => app.quit() }]));
   tray.on("click", show);
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: "Agent Hub", submenu: [{ label: "Открыть", click: show }, { role: "quit", label: "Выйти и остановить агентов" }] }, { role: "editMenu" }, { role: "viewMenu" }]));
-  await window.loadFile(join(app.getAppPath(), "ui/hub.html"));
+  if (!quitting) window.show();
 }
 
 void app.whenReady().then(async () => {
@@ -258,13 +273,37 @@ void app.whenReady().then(async () => {
       const probe = new SqliteStateStore(":memory:");
       await probe.read((s) => requireValue(s.version === 2, "Invalid packaged store"));
       await probe.close();
+      // Exercise the signed renderer too: file checks alone miss helper launch failures.
+      ipcMain.handle("hub:state", () => ({ connected: false, settings: { url: "", agents: [], notifications: false, theme: "system" }, health: {}, version: app.getVersion() }));
+      const renderer = new BrowserWindow({ show: false, webPreferences: { preload: join(app.getAppPath(), "dist/src/desktop-preload.cjs"), sandbox: true, contextIsolation: true, nodeIntegration: false } });
+      await new Promise<void>((resolveProbe, rejectProbe) => {
+        const timeout = setTimeout(() => rejectProbe(new Error("Packaged renderer did not load within 20 seconds")), 20_000);
+        renderer.webContents.once("render-process-gone", (_event, details) => { clearTimeout(timeout); rejectProbe(new Error(`Packaged renderer failed: ${details.reason} (${details.exitCode})`)); });
+        renderer.loadFile(join(app.getAppPath(), "ui/hub.html")).then(() => { clearTimeout(timeout); resolveProbe(); }, (error) => { clearTimeout(timeout); rejectProbe(error); });
+      });
+      const ready = await renderer.webContents.executeJavaScript(`new Promise(resolve => {
+        let attempts = 0;
+        const check = () => {
+          if (window.hub && !document.getElementById('onboarding')?.classList.contains('hidden')) return resolve(true);
+          if (++attempts >= 50) return resolve(false);
+          setTimeout(check, 20);
+        };
+        check();
+      })`);
+      requireValue(ready, "Packaged onboarding / preload did not initialize");
+      renderer.destroy();
       console.log("PACKAGE_SMOKE_OK"); app.exit(0); return;
     }
     await load(); if (settings.local) await startLocal();
     await createWindow();
     if (settings.url) client = new CollaborationClient(settings.url, settings.token);
     await sync(); poll = setInterval(() => void sync(), 3000);
-  } catch (error) { dialog.showErrorBox("Agent Hub", error instanceof Error ? error.message : String(error)); app.exit(1); }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (process.argv.includes("--smoke-test")) console.error(message);
+    else dialog.showErrorBox("Agent Hub", message);
+    app.exit(1);
+  }
 });
 app.on("activate", show);
 app.on("before-quit", (event) => {
