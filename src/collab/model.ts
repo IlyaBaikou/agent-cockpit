@@ -1,10 +1,12 @@
 import type { ContextStats, ThreadMemory } from "./context.js";
+import type { AgentDiagnostic } from "../agents/diagnostics.js";
 export type Executor = "codex" | "claude" | "cursor";
 export type Employee = { id: string; name: string };
 export type Agent = {
   id: string; owner: string; name: string; description: string; executor: Executor;
   device: string; enabled: boolean; allowWrite: boolean; fallback: string | null;
   seenAt: number; ready: boolean; detail: string;
+  diagnostic?: AgentDiagnostic;
 };
 export type Space = { id: string; name: string; owner: string; members: string[]; createdAt: number };
 export type Channel = { id: string; space: string; name: string; description: string; owner: string; createdAt: number; archived: boolean; general: boolean };
@@ -22,6 +24,8 @@ export type Message = {
   id: string; space: string; thread: string | null; author: string;
   channel?: string;
   kind: "human" | "agent" | "system"; content: string; createdAt: number;
+  diagnosticJob?: string;
+  clientRequestId?: string;
 };
 export type Job = {
   id: string; thread: string; agent: string; requestedBy: string; mode: "read" | "write";
@@ -30,6 +34,7 @@ export type Job = {
   remaining: number; visited: string[]; started: boolean;
   contextThrough?: string;
   contextStats?: ContextStats;
+  diagnostic?: AgentDiagnostic;
 };
 export type Notice = {
   seq: number; employee: string; title: string; body: string; space: string; thread: string | null;

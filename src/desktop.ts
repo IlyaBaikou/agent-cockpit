@@ -1,4 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, safeStorage, shell, Tray } from "electron";
+import { AgentExecutionError, agentFailure, type AgentDiagnostic } from "./agents/diagnostics.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
@@ -31,7 +32,7 @@ let localServer: Server | undefined;
 let localStore: SqliteStateStore | undefined;
 let poll: NodeJS.Timeout | undefined;
 const runners = new Map<string, EmployeeRunner>();
-const health = new Map<string, { ready: boolean; detail: string }>();
+const health = new Map<string, { ready: boolean; detail: string; diagnostic?: AgentDiagnostic }>();
 let saveQueue = Promise.resolve();
 
 // Finder/Start Menu launches often have a minimal PATH. No login shell is executed.
@@ -98,7 +99,7 @@ function startRunners(): void {
     if (!agent.enabled || runners.has(agent.id)) continue;
     const remote = snapshot.agents.find((a) => a.id === agent.id && a.owner === snapshot!.me.id && a.device === settings.device);
     if (!remote?.enabled) continue;
-    const runner = new EmployeeRunner(client, agent, settings.device, join(app.getPath("userData"), "worktrees"));
+    const runner = new EmployeeRunner(client, agent, settings.device, join(app.getPath("userData"), "worktrees"), undefined, app.getVersion());
     runner.on("health", (value: { id: string; ready: boolean; detail: string }) => { health.set(value.id, value); changed(); });
     runner.on("workspace", (value: { job: string; path: string }) => { settings.worktrees[value.job] = value.path; void save().catch((e: Error) => { connectionError = e.message; changed(); }); });
     runners.set(agent.id, runner); runner.start();
@@ -160,7 +161,11 @@ function handlers(): void {
   register("hub:call", async (op: string, input: Record<string, unknown>) => {
     requireValue(client && ["post", "space", "members", "thread-state", "profile", "revoke-invite", "channel", "channel-state", "channel-preference", "thread-subscription"].includes(op), "Недоступная операция");
     const result = await client.call(op, { ...input, requestId: typeof input.requestId === "string" ? input.requestId : randomUUID() });
-    await sync(true); return result;
+    // A post is acknowledged by the coordinator already. Do not hold its receipt
+    // behind another full poll. The renderer reconciles it by request/message ID.
+    if (op === "post") void sync(true);
+    else await sync(true);
+    return result;
   });
   register("hub:agent", async (input: LocalAgent) => {
     requireValue(client && snapshot, "Сначала подключитесь к хабу");
@@ -173,7 +178,15 @@ function handlers(): void {
     runners.get(id)?.stop(); runners.delete(id);
     settings.agents = [...settings.agents.filter((a) => a.id !== id), agent]; await save(); await sync(true); return agent;
   });
-  register("hub:check", async (input: LocalAgent) => ({ detail: await checkLocalAgent(input) }));
+  register("hub:check", async (input: LocalAgent) => {
+    requireValue(["codex", "claude", "cursor"].includes(input.executor), "Неизвестный исполнитель");
+    try { return { ok: true, detail: await checkLocalAgent(input) }; }
+    catch (error) {
+      const failure = error instanceof AgentExecutionError ? error : agentFailure({ provider: input.executor, stage: "version", error });
+      failure.diagnostic.appVersion = app.getVersion();
+      return { ok: false, detail: failure.message, diagnostic: failure.diagnostic };
+    }
+  });
   register("hub:directory", async () => (await dialog.showOpenDialog(window!, { properties: ["openDirectory"] })).filePaths[0] ?? "");
   register("hub:binary", async () => (await dialog.showOpenDialog(window!, { properties: ["openFile"] })).filePaths[0] ?? "");
   register("hub:preferences", async (input: { notifications?: boolean; theme?: Settings["theme"] }) => {

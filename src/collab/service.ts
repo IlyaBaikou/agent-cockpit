@@ -4,6 +4,7 @@ import { CollabError, field, generalChannelId, mentions, requireValue, type Agen
 import { makeGeneralChannel, migrateChannels } from "./channels.js";
 import type { StateStore } from "./store.js";
 import { acceptMemory, validMemory, type ContextPacket, type ContextStats } from "./context.js";
+import { acceptDiagnostic, diagnosticMessage, redact } from "../agents/diagnostics.js";
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 const secret = (): string => randomBytes(32).toString("base64url");
@@ -217,8 +218,14 @@ export class CollaborationService {
       }
       case "heartbeat": {
         const agent = this.ownedAgent(s, actor, b.agent, b.device);
-        agent.seenAt = this.now(); agent.ready = bool(b.ready); agent.detail = typeof b.detail === "string" ? b.detail.slice(0, 500) : "";
-        if (!agent.ready) for (const job of s.jobs.filter((j) => j.agent === agent.id && j.status === "queued")) this.fallback(s, job, agent.detail || "Локальный исполнитель недоступен");
+        const diagnostic = !bool(b.ready) ? acceptDiagnostic(b.diagnostic, agent.executor, this.now()) : undefined;
+        if (diagnostic) agent.diagnostic = diagnostic; else delete agent.diagnostic;
+        agent.seenAt = this.now(); agent.ready = bool(b.ready); agent.detail = diagnostic ? diagnosticMessage(diagnostic) : typeof b.detail === "string" ? redact(b.detail).slice(0, 500) : "";
+        if (!agent.ready) for (const job of s.jobs.filter((j) => j.agent === agent.id && j.status === "queued")) {
+          if (diagnostic) job.diagnostic = diagnostic;
+          this.fallback(s, job, agent.detail || "Локальный исполнитель недоступен");
+        }
+        this.pruneDiagnostics(s);
         return { ok: true };
       }
       case "post": return this.post(s, actor, b);
@@ -308,7 +315,11 @@ export class CollaborationService {
       case "fail": {
         const job = this.leased(s, actor, b, true);
         if (job.status !== "running") return { ok: true };
-        this.fallback(s, job, typeof b.error === "string" ? b.error.slice(0, 2000) : "Ошибка выполнения");
+        const agent = s.agents.find((a) => a.id === job.agent)!;
+        const diagnostic = acceptDiagnostic(b.diagnostic, agent.executor, this.now());
+        if (diagnostic) job.diagnostic = diagnostic;
+        this.fallback(s, job, diagnostic ? diagnosticMessage(diagnostic) : typeof b.error === "string" ? redact(b.error).slice(0, 2000) : "Ошибка выполнения");
+        this.pruneDiagnostics(s);
         return { ok: true };
       }
       default: throw new CollabError("Неизвестная операция", 404);
@@ -317,6 +328,13 @@ export class CollaborationService {
 
   private post(s: State, actor: string, b: Record<string, unknown>): unknown {
     const space = this.space(s, actor, b.space);
+    // Durable deduplication survives eviction from the short RPC response cache.
+    // A lost acknowledgement must never create another thread or agent job.
+    const receipt = typeof b.requestId === "string" && b.requestId ? s.messages.find((m) => m.author === actor && m.clientRequestId === b.requestId) : undefined;
+    if (receipt) {
+      requireValue(receipt.space === space.id, "Идентификатор отправки уже использован в другом спейсе", 409);
+      return { message: receipt, thread: receipt.thread ? this.thread(s, actor, receipt.thread) : null };
+    }
     const content = field(b.content, "Сообщение", 40_000);
     let thread = b.thread ? this.thread(s, actor, b.thread) : undefined;
     requireValue(!thread || thread.space === space.id, "Тред относится к другому спейсу");
@@ -338,6 +356,7 @@ export class CollaborationService {
       if (targets.length) requireValue(!s.jobs.some((j) => j.thread === thread.id && this.active(j)), "Агент уже работает. Можно дописать сообщение без вызова, либо нажать «Стоп».", 409);
     }
     const message = this.message(s, space.id, thread?.id ?? null, actor, "human", content, channel.id);
+    if (typeof b.requestId === "string" && b.requestId) message.clientRequestId = b.requestId;
     this.notifyDiscussion(s, message);
     if (thread && targets[0]) this.route(s, thread, targets[0], actor, b.mode === "write" ? "write" : "read", LIMIT, []);
     return { message, thread: thread ?? null };
@@ -365,9 +384,10 @@ export class CollaborationService {
     job.status = "error";
     const uncertain = job.mode === "write" && job.started;
     if (!uncertain && thread.revision === job.revision && agent.fallback && job.visited.length < 5 && !job.visited.includes(agent.fallback)) {
-      this.message(s, thread.space, thread.id, "hub", "system", `${agent.name}: ${reason}. Передаю настроенному резервному агенту ${this.name(s, agent.fallback)}.`);
+      const message = this.message(s, thread.space, thread.id, "hub", "system", `${agent.name}: ${reason} Передаю настроенному резервному агенту ${this.name(s, agent.fallback)}.`);
+      if (job.diagnostic) message.diagnosticJob = job.id;
       this.route(s, thread, agent.fallback, job.requestedBy, job.mode, job.remaining, job.visited);
-    } else this.failThread(s, thread, job.requestedBy, `${agent.name}: ${reason}. ${uncertain ? "Изменения могли быть сделаны. Повторный запуск запрещён до проверки локальной рабочей копии владельцем." : "Автоматическая передача невозможна. Настройте резервного агента или вызовите другого вручную."}`);
+    } else this.failThread(s, thread, job.requestedBy, `${agent.name}: ${reason} ${uncertain ? "Изменения могли быть сделаны. Повторный запуск запрещён до проверки локальной рабочей копии владельцем." : "Автоматическая передача не выполнена. После устранения причины вызовите агента снова или выберите другого вручную."}`, job.diagnostic ? job.id : undefined);
   }
 
   private sweep(s: State): void {
@@ -444,9 +464,17 @@ export class CollaborationService {
     thread.status = "waiting"; this.message(s, thread.space, thread.id, "hub", "system", reason);
     this.notice(s, employee, "Нужно ваше решение", thread.title, thread.space, thread.id);
   }
-  private failThread(s: State, thread: Thread, employee: string, reason: string): void {
-    thread.status = "error"; this.message(s, thread.space, thread.id, "hub", "system", reason);
+  private failThread(s: State, thread: Thread, employee: string, reason: string, diagnosticJob?: string): void {
+    thread.status = "error";
+    const message = this.message(s, thread.space, thread.id, "hub", "system", reason);
+    if (diagnosticJob) message.diagnosticJob = diagnosticJob;
     this.notice(s, employee, "Агент не смог продолжить", reason, thread.space, thread.id);
+  }
+  private pruneDiagnostics(s: State): void {
+    const keep = new Set(s.jobs.filter((j) => j.diagnostic && j.diagnostic.at > this.now() - 14 * 86400_000)
+      .sort((a, b) => b.diagnostic!.at - a.diagnostic!.at).slice(0, 200).map((j) => j.id));
+    for (const job of s.jobs) if (job.diagnostic && !keep.has(job.id)) delete job.diagnostic;
+    for (const agent of s.agents) if (agent.diagnostic && agent.diagnostic.at <= this.now() - 14 * 86400_000) delete agent.diagnostic;
   }
   private snapshot(s: State, actor: string, channelVersion = false): Snapshot {
     const spaces = s.spaces.filter((sp) => sp.members.includes(actor));
@@ -458,9 +486,11 @@ export class CollaborationService {
     const tids = new Set(threads.map((t) => t.id));
     return {
       me: s.employees.find((e) => e.id === actor)!, revision: s.revision,
-      employees: s.employees, agents: s.agents.map((a) => ({ ...a, ready: a.ready && a.seenAt > this.now() - LEASE })),
+      employees: s.employees, agents: s.agents.map(({ diagnostic, ...a }) => ({ ...a, ready: a.ready && a.seenAt > this.now() - LEASE,
+        ...(diagnostic && a.owner === actor && diagnostic.at > this.now() - 14 * 86400_000 ? { diagnostic } : {}) })),
       spaces, threads, messages: s.messages.filter((m) => ids.has(m.space) && visible(m)),
-      jobs: s.jobs.filter((j) => tids.has(j.thread)).map(({ lease: _lease, ...job }) => job),
+      jobs: s.jobs.filter((j) => tids.has(j.thread)).map(({ lease: _lease, diagnostic, ...job }) => ({ ...job,
+        ...(diagnostic && diagnostic.at > this.now() - 14 * 86400_000 && (s.agents.find((a) => a.id === job.agent)?.owner === actor || this.credentials.some((c) => c.actor === actor)) ? { diagnostic } : {}) })),
       notices: s.notices.filter((n) => n.employee === actor && ids.has(n.space) && visible(n)).map((n) => ({ ...n,
         silent: (s.channelPreferences ?? []).some((p) => p.employee === actor && p.channel === (n.channel ?? generalChannelId(n.space)) && p.muted) })), sequence: s.sequence,
       ...(channelVersion ? { channels,

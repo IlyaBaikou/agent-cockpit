@@ -2,7 +2,7 @@ import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runProcess } from "../process.js";
+import { agentFailure, runAgentProcess, checkWorkspace } from "./diagnostics.js";
 import type { AgentAdapter, AgentRequest, AgentResult } from "./adapter.js";
 
 export async function resolveCodexBinary(explicit?: string): Promise<string> {
@@ -34,17 +34,18 @@ export class CodexAdapter implements AgentAdapter {
 
   async healthCheck(): Promise<string> {
     const binary = await resolveCodexBinary(this.#explicitBinary);
-    const result = await runProcess(binary, ["--version"], { timeoutMs: 10_000 });
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr || "Codex health check failed");
+    const result = await runAgentProcess("codex", "version", binary, ["--version"], { timeoutMs: 10_000 });
+    if (result.exitCode !== 0 || !result.stdout.trim()) {
+      throw agentFailure({ provider: "codex", stage: "version", binary, result });
     }
-    const auth = await runProcess(binary, ["login", "status"], { timeoutMs: 10_000 });
-    if (auth.exitCode !== 0) throw new Error("Codex установлен, но не авторизован. Выполните codex login.");
+    const auth = await runAgentProcess("codex", "auth", binary, ["login", "status"], { timeoutMs: 10_000 });
+    if (auth.exitCode !== 0) throw agentFailure({ provider: "codex", stage: "auth", binary, result: auth, code: "auth" });
     return `${result.stdout.trim()} (authenticated)`;
   }
 
   async run(request: AgentRequest): Promise<AgentResult> {
     const binary = await resolveCodexBinary(this.#explicitBinary);
+    await checkWorkspace("codex", request.repositoryPath);
     const tempDirectory = await mkdtemp(join(tmpdir(), "animaplay-agent-hub-codex-"));
     const outputPath = join(tempDirectory, "last-message.txt");
 
@@ -68,8 +69,8 @@ export class CodexAdapter implements AgentAdapter {
             request.prompt,
           ].join("\n");
 
-      const result = await runProcess(
-        binary,
+      const result = await runAgentProcess(
+        "codex", "run", binary,
         [
           "--sandbox",
           writeMode ? "workspace-write" : "read-only",
@@ -86,16 +87,16 @@ export class CodexAdapter implements AgentAdapter {
           outputPath,
           prompt,
         ],
-        { cwd: request.repositoryPath, timeoutMs: this.#timeoutMs, ...(request.signal ? { signal: request.signal } : {}) },
+        { cwd: request.repositoryPath, timeoutMs: this.#timeoutMs, ...(request.signal ? { signal: request.signal } : {}) }, [prompt, request.prompt],
       );
 
       if (result.exitCode !== 0) {
-        throw new Error(result.stderr.trim() || `Codex exited with code ${result.exitCode}`);
+        throw agentFailure({ provider: "codex", stage: "response", binary, result, sensitive: [prompt, request.prompt] });
       }
 
-      const content = (await readFile(outputPath, "utf8")).trim();
+      const content = (await readFile(outputPath, "utf8").catch(() => "")).trim();
       if (!content) {
-        throw new Error("Codex returned an empty response");
+        throw agentFailure({ provider: "codex", stage: "response", binary, result, code: "empty_response", sensitive: [prompt, request.prompt] });
       }
       return { agent: this.id, content };
     } finally {

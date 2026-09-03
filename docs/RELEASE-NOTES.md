@@ -1,4 +1,16 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.5.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.6.
+
+New in 0.2.6:
+
+- Messages appear immediately with “Sending…”, then a coordinator acknowledgement. New drafts stay intact. Unconfirmed messages remain in their original chat with a retry button while the app is open; the outbox is not persisted across quitting the app.
+- Retries reuse the original request ID. Durable receipts in message history prevent duplicate messages, threads and agent launches even after the short RPC response cache expires. An acknowledgement is not a read receipt.
+- Human-readable CLI failures distinguish missing executables/folders, authentication, unsupported arguments, trust prompts, network errors, quotas, timeouts, empty output and unsupported response formats. Unknown failures are explicitly labelled unknown rather than blamed on authentication.
+- “Error details” shows stage, platform, app/CLI versions, exit/system codes and bounded redacted stdout/stderr. The connection check also displays details and clears its progress indicator on failure.
+- Detailed job reports are stored on the coordinator, visible only to the agent owner or a configured bootstrap control operator who also has access to the thread's space. Other participants see only a short safe explanation. Space ownership alone does not grant access to someone else's diagnostics.
+- Reports retain at most 4,000 characters per output stream (plus a truncation marker), up to 200 job reports for 14 days. Expired details are hidden and pruned during report/heartbeat writes; original chat history is preserved. Prompts, command arguments and environment snapshots are not collected. Known secrets and home-directory names are redacted, but arbitrary CLI output can still contain private data: inspect before sharing.
+- Claude discovery supports versioned Windows Desktop installations under AppData/Roaming and native .local/bin installations. Explicit binary overrides remain authoritative. Empty/malformed Claude auth status no longer incorrectly counts as a successful login.
+- Claude/Cursor parsing handles final-result objects, arrays and newline-delimited JSON without treating partial tool events as completed answers. Failure diagnostics preserve plain stdout, stderr even on exit 0, and structured provider errors. Cursor write mode no longer passes unsupported --mode=agent (agent mode is the default).
+- Update **both the coordinator and desktop apps** for server-side reports. Existing PostgreSQL/SQLite history, credentials and agent settings remain in place. Previously discarded error output cannot be recovered; repeat the failed request after updating. This release improves diagnostics and known compatibility issues, but does not claim to resolve every provider-side failure.
 
 New in 0.2.5:
 

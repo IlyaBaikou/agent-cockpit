@@ -87,3 +87,10 @@
 [data-theme="dark"] .thread-link-card:hover{background:#2f2842;border-color:#9577c5}
 [data-theme="dark"] .thread-link-card>strong{color:#e4d8fa}
 [data-theme="dark"] .thread-link-preview,[data-theme="dark"] .thread-link-meta{color:#b5b4cb}
+/* Error reports use plain, escaped text; no provider-controlled HTML. */
+.diagnostic{font-size:12px;line-height:1.6;overflow-wrap:anywhere;color:inherit}
+.diagnostic dl{display:grid;grid-template-columns:125px minmax(0,1fr);gap:6px 12px}.diagnostic dt{font-weight:600}.diagnostic dd{margin:0}
+.diagnostic pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:230px;overflow:auto;padding:12px;border:1px solid #8884;border-radius:8px;font-size:11px}
+.diagnostic-button{font-size:11px;padding:5px 9px}.inline-state details{margin-top:10px}.inline-state summary{cursor:pointer}
+.delivery{font-size:10px;font-weight:400;white-space:nowrap}.delivery.sending{color:#8c76b7}.delivery.sent{color:#6b8b79}.delivery.failed,.delivery-error{color:#b34d67}.message.sending .avatar{opacity:.6}.delivery-error{font-size:11px;margin-top:8px;line-height:1.6;overflow-wrap:anywhere}.delivery-error small{display:block;opacity:.85}.delivery-error button{font-size:11px;padding:5px 9px}.message-head{flex-wrap:wrap}
+[data-theme="dark"] .delivery.sending{color:#b7a0e8}[data-theme="dark"] .delivery.sent{color:#9abbab}[data-theme="dark"] .delivery.failed,[data-theme="dark"] .delivery-error{color:#ff9caf}

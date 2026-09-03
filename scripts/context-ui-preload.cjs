@@ -1,6 +1,8 @@
 // Synthetic UI fixture only. No coordinator, credentials or real agents.
 const { contextBridge } = require("electron");
 const now = Date.now();
+let postBehavior = {};
+const receipts = new Map();
 const me = { id: "owner", name: "Alex" };
 const snapshot = {
   groupInvitations: [{ id: "demo-invite", owner: "owner", space: "demo-space", createdAt: now, expiresAt: now + 7 * 86400_000, maxUses: 100, uses: 3, revoked: false }],
@@ -33,6 +35,13 @@ contextBridge.exposeInMainWorld("hub", {
   joinInvite: async (input) => { calls.push({ op: "joinInvite", input }); return { space: "demo-space" }; },
   call: async (op, input) => {
     calls.push({ op, input }); let result = {};
+    const behavior = op === "post" ? postBehavior : {};
+    if (op === "post") {
+      postBehavior = {};
+      if (behavior.delayMs) await new Promise((resolve) => setTimeout(resolve, behavior.delayMs));
+      if (behavior.fail) throw new Error("Соединение прервано: тест отправки");
+      if (receipts.has(input.requestId)) { changed(state()); return receipts.get(input.requestId); }
+    }
     if (op === "revoke-invite") snapshot.groupInvitations[0].revoked = true;
     if (op === "channel") {
       const c = snapshot.channels.find(c => c.id === input.id) ?? { id: "created-channel", space: input.space, owner: "owner", general: false, archived: false };
@@ -42,13 +51,16 @@ contextBridge.exposeInMainWorld("hub", {
     if (op === "channel-preference") snapshot.channelPreferences = [{ employee: "owner", channel: input.channel, muted: input.muted }];
     if (op === "thread-subscription") snapshot.threadSubscriptions = [{ employee: "owner", thread: input.thread, following: input.following }];
     if (op === "post") {
-      const thread = input.newThread || input.content.includes('@{a:') ? { id: "created-thread", space: input.space, channel: input.channel, title: input.title ?? "Проверка контракта прогресса", owner: "owner", status: "open", createdAt: Date.now() } : null;
-      if (thread) snapshot.threads.push(thread);
-      const message = { id: `created-message-${++messageSequence}`, space: input.space, channel: input.channel, thread: thread?.id ?? input.thread ?? null, kind: "human", author: "owner", content: input.content, createdAt: Date.now() };
+      const thread = !input.thread && (input.newThread || input.content.includes('@{a:')) ? { id: "created-thread", space: input.space, channel: input.channel, title: input.title ?? "Проверка контракта прогресса", owner: "owner", status: "open", createdAt: Date.now() } : snapshot.threads.find(t => t.id === input.thread) ?? null;
+      if (thread && !snapshot.threads.some(t => t.id === thread.id)) snapshot.threads.push(thread);
+      const message = { id: `created-message-${++messageSequence}`, space: input.space, channel: input.channel, thread: thread?.id ?? input.thread ?? null, kind: "human", author: "owner", content: input.content, createdAt: Date.now(), clientRequestId: input.requestId };
       snapshot.messages.push(message); result = { thread, message };
+      if (input.requestId) receipts.set(input.requestId, result);
+      if (behavior.loseAck) throw new Error("Подтверждение потеряно: тест отправки");
     }
     changed(state()); return result;
   },
   connect: async (input) => { calls.push({ op: "connect", input }); return state(); },
   testCalls: () => calls,
+  testConfigurePost: (behavior) => { postBehavior = behavior; },
 });

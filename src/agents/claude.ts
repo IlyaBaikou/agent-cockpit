@@ -1,50 +1,38 @@
-import { access, readdir } from "node:fs/promises";
+import { stat, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { runProcess } from "../process.js";
+import { agentFailure, runAgentProcess, checkWorkspace } from "./diagnostics.js";
+import { parseCliOutput } from "./cli-output.js";
 import type { AgentAdapter, AgentRequest, AgentResult } from "./adapter.js";
-
-type ClaudeJsonResult = {
-  result?: string;
-  session_id?: string;
-  is_error?: boolean;
-};
 
 type ClaudeAuthStatus = {
   loggedIn?: boolean;
   authMethod?: string;
 };
 
-function parseClaudeResult(output: string): ClaudeJsonResult | undefined {
-  try {
-    return JSON.parse(output) as ClaudeJsonResult;
-  } catch {
-    return undefined;
-  }
-}
-
 async function exists(path: string): Promise<boolean> {
   try {
-    await access(path);
-    return true;
+    return (await stat(path)).isFile();
   } catch {
     return false;
   }
 }
 
-export async function resolveClaudeBinary(explicit?: string): Promise<string> {
+export async function resolveClaudeBinary(explicit?: string, environment = process.env, platform = process.platform, home = homedir()): Promise<string> {
   if (explicit) {
     return explicit;
   }
-  if (process.env.CLAUDE_BIN) {
-    return process.env.CLAUDE_BIN;
+  if (environment.CLAUDE_BIN) {
+    return environment.CLAUDE_BIN;
   }
 
-  const base = join(homedir(), "Library", "Application Support", "Claude", "claude-code");
+  const base = platform === "win32"
+    ? join(environment.APPDATA || join(home, "AppData", "Roaming"), "Claude", "claude-code")
+    : join(home, "Library", "Application Support", "Claude", "claude-code");
   try {
-    const versions = (await readdir(base)).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+    const versions = (await readdir(base)).filter((v) => /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(v)).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
     for (const version of versions) {
-      const candidate = join(base, version, "claude.app", "Contents", "MacOS", "claude");
+      const candidate = platform === "win32" ? join(base, version, "claude.exe") : join(base, version, "claude.app", "Contents", "MacOS", "claude");
       if (await exists(candidate)) {
         return candidate;
       }
@@ -52,6 +40,8 @@ export async function resolveClaudeBinary(explicit?: string): Promise<string> {
   } catch {
     // Fall back to PATH below.
   }
+  const native = join(home, ".local", "bin", platform === "win32" ? "claude.exe" : "claude");
+  if (await exists(native)) return native;
   return "claude";
 }
 
@@ -67,25 +57,26 @@ export class ClaudeAdapter implements AgentAdapter {
 
   async healthCheck(): Promise<string> {
     const binary = await resolveClaudeBinary(this.#explicitBinary);
-    const version = await runProcess(binary, ["--version"], { timeoutMs: 10_000 });
-    if (version.exitCode !== 0) {
-      throw new Error(version.stderr || "Claude health check failed");
+    const version = await runAgentProcess("claude", "version", binary, ["--version"], { timeoutMs: 10_000 });
+    if (version.exitCode !== 0 || !version.stdout.trim()) {
+      throw agentFailure({ provider: "claude", stage: "version", binary, result: version, code: "empty_response" });
     }
-    const auth = await runProcess(binary, ["auth", "status"], { timeoutMs: 10_000 });
+    const auth = await runAgentProcess("claude", "auth", binary, ["auth", "status"], { timeoutMs: 10_000 });
     let status: ClaudeAuthStatus | undefined;
     try {
       status = JSON.parse(auth.stdout) as ClaudeAuthStatus;
     } catch {
       // The version check above still gives a useful error if auth status changes format.
     }
-    if (auth.exitCode !== 0 || status?.loggedIn === false) {
-      throw new Error("Claude Code is installed but not logged in; run `claude auth login`");
+    if (auth.exitCode !== 0 || status?.loggedIn !== true) {
+      throw agentFailure({ provider: "claude", stage: "auth", binary, result: auth, code: status?.loggedIn === false ? "auth" : "invalid_response" });
     }
     return `${version.stdout.trim()} (${status?.authMethod ?? "authenticated"})`;
   }
 
   async run(request: AgentRequest): Promise<AgentResult> {
     const binary = await resolveClaudeBinary(this.#explicitBinary);
+    await checkWorkspace("claude", request.repositoryPath);
     const writeMode = request.mode === "write";
     const prompt = request.purpose === "summary" ? request.prompt : writeMode
       ? [
@@ -106,8 +97,8 @@ export class ClaudeAdapter implements AgentAdapter {
           request.prompt,
         ].join("\n");
 
-    const result = await runProcess(
-      binary,
+    const result = await runAgentProcess(
+      "claude", "run", binary,
       [
         "--print",
         "--output-format",
@@ -119,21 +110,19 @@ export class ClaudeAdapter implements AgentAdapter {
         "--no-session-persistence",
         prompt,
       ],
-      { cwd: request.repositoryPath, timeoutMs: this.#timeoutMs, ...(request.signal ? { signal: request.signal } : {}) },
+      { cwd: request.repositoryPath, timeoutMs: this.#timeoutMs, ...(request.signal ? { signal: request.signal } : {}) }, [prompt, request.prompt],
     );
 
-    const parsed = parseClaudeResult(result.stdout) ?? { result: result.stdout.trim() };
-    if (result.exitCode !== 0) {
-      throw new Error(parsed.result?.trim() || result.stderr.trim() || `Claude exited with code ${result.exitCode}`);
-    }
-    if (parsed.is_error || !parsed.result?.trim()) {
-      throw new Error(parsed.result?.trim() || "Claude returned an empty response");
+    const parsed = parseCliOutput(result.stdout);
+    if (result.exitCode !== 0 || parsed.failed || !parsed.content) {
+      throw agentFailure({ provider: "claude", stage: "response", binary, result, detail: parsed.error,
+        code: result.exitCode !== 0 || parsed.failed ? "cli_failed" : !parsed.complete ? "invalid_response" : "empty_response", sensitive: [prompt, request.prompt] });
     }
 
     return {
       agent: this.id,
-      content: parsed.result.trim(),
-      ...(parsed.session_id ? { sessionId: parsed.session_id } : {}),
+      content: parsed.content,
+      ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
     };
   }
 }

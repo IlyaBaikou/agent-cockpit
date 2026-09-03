@@ -36,6 +36,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Verify native CLI diagnostics on desktop OS
+        run: npx vitest run test/agent-diagnostics.test.ts test/diagnostic-delivery.test.ts test/process-diagnostics.test.ts
       - name: Verify context memory UI with synthetic data
         timeout-minutes: 2
         run: node node_modules/electron/cli.js scripts/smoke-context-ui.cjs

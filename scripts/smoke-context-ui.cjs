@@ -175,6 +175,68 @@ app.whenReady().then(async () => {
     })()`);
     console.log("CHANNELS_UI_SMOKE_OK", channels);
     if (process.argv[2]) writeFileSync(resolve(process.argv[2]).replace(/\.png$/, '-channels.png'), (await window.webContents.capturePage()).toPNG());
+    const delivery = await window.webContents.executeJavaScript(`(async () => {
+      const check = (condition, detail) => { if (!condition) throw new Error(detail); };
+      const wait = async (condition) => { for (let i = 0; i < 150; i++) { if (condition()) return; await new Promise(r => setTimeout(r, 20)); } throw new Error('Delivery fixture timeout'); };
+      const composer = document.getElementById('composer');
+      navigate('demo-space', null, 'gamification'); composer.value = '';
+      await window.hub.testConfigurePost({ delayMs: 180 });
+      composer.value = 'Мгновенное сообщение'; document.getElementById('composer-form').requestSubmit();
+      check(document.querySelector('.delivery.sending') && document.getElementById('messages').innerText.includes('Мгновенное сообщение'), 'Pending message must appear before network confirmation');
+      check(composer.value === '', 'Accepted local send must immediately free the composer');
+      composer.value = 'Следующий черновик не потерять';
+      await wait(() => !document.querySelector('.delivery.sending'));
+      check(composer.value === 'Следующий черновик не потерять', 'Server receipt must not clear newly typed text');
+      check([...document.querySelectorAll('.message-body')].filter(m => m.innerText.includes('Мгновенное сообщение')).length === 1, 'Receipt duplicated message');
+      check(document.querySelector('.delivery.sent'), 'Acknowledgement must be visible');
+      composer.value = '';
+      await window.hub.testConfigurePost({ delayMs: 80, loseAck: true });
+      composer.value = 'Потерянное подтверждение'; document.getElementById('composer-form').requestSubmit();
+      await wait(() => document.querySelector('[data-retry]'));
+      const failed = [...outbox.values()].find(p => p.request.content === 'Потерянное подтверждение');
+      check(failed?.state === 'failed', 'Failure must remain in the originating chat');
+      document.querySelector('[data-retry]').click();
+      await wait(() => !document.querySelector('[data-retry]') && !document.querySelector('.delivery.sending'));
+      const attempts = (await window.hub.testCalls()).filter(c => c.op === 'post' && c.input.content === 'Потерянное подтверждение');
+      check(attempts.length === 2 && attempts[0].input.requestId === attempts[1].input.requestId, 'Retry must keep immutable request ID');
+      check(data.messages.filter(m => m.content === 'Потерянное подтверждение').length === 1, 'Lost acknowledgement duplicated accepted post');
+      await window.hub.testConfigurePost({ delayMs: 100, fail: true });
+      composer.value = 'Ошибка при смене канала'; document.getElementById('composer-form').requestSubmit();
+      navigate('demo-space', 'demo-thread', 'general:demo-space'); composer.value = 'Черновик другого треда';
+      await wait(() => [...outbox.values()].some(p => p.request.content === 'Ошибка при смене канала' && p.state === 'failed'));
+      check(threadId === 'demo-thread' && composer.value === 'Черновик другого треда', 'Late failure must not navigate or replace another draft');
+      check(!document.getElementById('messages').innerText.includes('Ошибка при смене канала'), 'Pending message leaked to another channel');
+      navigate('demo-space', null, 'gamification'); check(document.querySelector('[data-retry]'), 'Failure disappeared on navigation');
+      document.querySelector('[data-retry]').click(); await wait(() => !document.querySelector('[data-retry]'));
+      // A slow new-thread acknowledgement must not pull a user out of another chat.
+      await window.hub.testConfigurePost({ delayMs: 100 });
+      composer.value = '@{a:a} Тест нового треда'; document.getElementById('composer-form').requestSubmit();
+      navigate('demo-space', 'demo-thread', 'general:demo-space');
+      await wait(() => ![...outbox.values()].some(p => p.request.content.includes('Тест нового треда') && p.state === 'sending'));
+      check(threadId === 'demo-thread', 'Late receipt redirected the user');
+      return { immediate: true, receipt: true, retrySameId: true, noDuplicates: true, draftPreserved: true, scoped: true, noLateRedirect: true };
+    })()`);
+    console.log("MESSAGE_DELIVERY_UI_SMOKE_OK", delivery);
+    await window.webContents.executeJavaScript(`(() => {
+      const check = (condition, detail) => { if (!condition) throw new Error(detail); };
+      const d = { version: 1, provider: 'claude', stage: 'response', code: 'network', summary: 'CLI сообщил об ошибке соединения.', hint: 'Проверьте сеть и доступ к провайдеру.', at: Date.now(), exitCode: 0, systemCode: '', signal: '', binary: '[home]\\\\Claude\\\\claude.exe', platform: 'win32', osVersion: '10.0', arch: 'x64', cliVersion: '2.1.258', appVersion: '0.2.6', stdout: '{"result":""}', stderr: 'ECONNRESET <img src=x onerror=alert(1)>', outputTruncated: false };
+      data.jobs.push({ id: 'diagnostic-demo', thread: 'demo-thread', agent: 'a', status: 'error', diagnostic: d });
+      data.messages.push({ id: 'diagnostic-message', space: 'demo-space', channel: 'general:demo-space', thread: 'demo-thread', kind: 'system', author: 'hub', content: 'Backend Reviewer: CLI сообщил об ошибке соединения. Проверьте доступ к провайдеру.', diagnosticJob: 'diagnostic-demo', createdAt: Date.now() });
+      navigate('demo-space', 'demo-thread', 'general:demo-space');
+      check(document.querySelector('[data-diagnostic]'), 'Report link missing');
+      document.querySelector('[data-diagnostic]').click();
+      check(document.getElementById('modal-content').innerText.includes('ECONNRESET'), 'stderr missing');
+      check(!document.querySelector('#modal-content img'), 'Diagnostic output must be HTML escaped');
+      check(document.getElementById('modal-content').innerText.includes('0.2.6'), 'App version missing');
+      check(document.getElementById('modal').open, 'Diagnostic modal did not open');
+    })()`);
+    await window.webContents.executeJavaScript(`new Promise(resolve => setTimeout(resolve, 150))`);
+    if (process.argv[2]) writeFileSync(resolve(process.argv[2]).replace(/\.png$/, '-diagnostic.png'), (await window.webContents.capturePage()).toPNG());
+    await window.webContents.executeJavaScript(`(() => {
+      closeModal(); delete data.jobs.find(j => j.id === 'diagnostic-demo').diagnostic; renderChat();
+      if (document.querySelector('[data-diagnostic]')) throw new Error('Report button visible without permission/report');
+    })()`);
+    console.log("DIAGNOSTICS_UI_SMOKE_OK");
     await window.webContents.executeJavaScript(`window.hub.preferences({ theme: 'system' });`);
     for (const color of ["dark", "light"]) {
       nativeTheme.themeSource = color;

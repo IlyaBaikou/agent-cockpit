@@ -4,7 +4,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const labels = { open: "Открыт", working: "Агенты работают", waiting: "Нужен человек", resolved: "Решено", error: "Ошибка", paused: "На паузе" };
 let appState, data, spaceId = null, channelId = null, threadId = null, renderKey = "", mentionStart = null;
 let channelSupport = false;
-let draftRequest = null;
+const outbox = new Map();
 let invitationView = null;
 const drafts = new Map();
 const name = (id) => data?.agents.find((a) => a.id === id)?.name ?? data?.employees.find((e) => e.id === id)?.name ?? "Agent Hub";
@@ -30,6 +30,17 @@ async function safely(action, target = "modal-error") {
 }
 function openModal(title, html) { $("modal-title").textContent = title; $("modal-content").innerHTML = html; $("modal-error").textContent = ""; if (!$("modal").open) $("modal").showModal(); }
 function closeModal() { $("modal").close(); }
+function diagnosticHtml(d, job) {
+  const stages = { workspace: "Рабочая папка", version: "Поиск и версия CLI", auth: "Авторизация", run: "Запуск CLI", response: "Обработка ответа" };
+  const fields = [["Задание", job || "Проверка подключения"], ["Этап", stages[d.stage] || d.stage], ["Причина", d.code],
+    ["Завершение", d.exitCode === null ? "Процесс не завершился штатно / не запущен" : d.exitCode], ["Системная ошибка", d.systemCode || d.signal || "—"],
+    ["ОС", `${d.platform} ${d.osVersion} ${d.arch}`], ["Agent Hub", d.appVersion], ["Версия CLI", d.cliVersion], ["Файл CLI", d.binary || "—"], ["Время", new Date(d.at).toLocaleString()]];
+  return `<section class="diagnostic"><p><strong>${esc(d.summary)}</strong></p><p>${esc(d.hint)}</p><dl>${fields.map(([k,v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl><h4>Диагностический вывод (stderr)</h4><pre>${esc(d.stderr || "Нет вывода")}</pre><h4>Вывод программы (stdout)</h4><pre>${esc(d.stdout || "Нет вывода")}</pre><p class="hint">${d.outputTruncated ? "Вывод сокращён. " : ""}Известные секреты скрыты; запрос и параметры запуска не сохраняются. Вывод всё же может содержать приватные сведения: проверьте его перед пересылкой. На хабе подробности доступны владельцу агента и оператору хаба в этом спейсе, хранятся до 14 дней (не более 200 отчётов).</p></section>`;
+}
+function showDiagnostic(jobId) {
+  const job = data.jobs.find((j) => j.id === jobId);
+  if (job?.diagnostic) openModal("Подробности ошибки", diagnosticHtml(job.diagnostic, jobId));
+}
 $("modal-close").onclick = closeModal;
 function inline(text) {
   return esc(text).replace(/@\{([au]):([a-zA-Z0-9._-]+)\}/g, (_m, _kind, id) => `<span class="mention">@${esc(name(id))}</span>`)
@@ -50,7 +61,14 @@ document.addEventListener("change", (event) => {
   void window.hub.preferences({ theme: selected }).catch((error) => { applyTheme(before); toast(errorText(error)); });
 });
 function receive(value) {
+  if (data?.me.id && (value.snapshot?.me.id !== data.me.id || value.settings.url !== appState.settings.url)) { outbox.clear(); drafts.clear(); }
   appState = value; data = value.snapshot;
+  if (data) {
+    for (const [id, pending] of outbox) {
+      if (data.messages.some((m) => m.author === pending.author && (m.clientRequestId === id || m.id === pending.result?.message?.id))) outbox.delete(id);
+      else if (pending.result?.thread && data.spaces.some((s) => s.id === pending.request.space) && !data.threads.some((t) => t.id === pending.result.thread.id)) data.threads.push(pending.result.thread);
+    }
+  }
   channelSupport = Array.isArray(data?.channels);
   applyTheme(value.settings.theme ?? "system");
   $("onboarding").classList.toggle("hidden", Boolean(data)); $("workspace").classList.toggle("hidden", !data);
@@ -172,7 +190,11 @@ function renderChat() {
   $("chat-subtitle").innerHTML = thread ? `${status(thread.status)} &nbsp; Начал ${esc(name(thread.owner))}` : esc(channel?.description || "Обсуждения команды. Один вопрос — один тред.");
   $("thread-actions").classList.toggle("hidden", !thread);
   $("resolve").textContent = thread?.status === "resolved" ? "↺ Открыть" : "✓ Завершить";
-  const messages = data.messages.filter((m) => m.space === spaceId && channelOf(m) === channelId && m.thread === threadId);
+  const pending = [...outbox.values()].filter((p) => p.request.space === spaceId && p.channel === channelId && (p.result?.message?.thread ?? p.request.thread ?? null) === threadId
+    && !data.messages.some((m) => m.author === p.author && (m.clientRequestId === p.id || m.id === p.result?.message?.id)))
+    .map((p) => ({ id: p.result?.message?.id ?? p.id, space: p.request.space, channel: p.channel, thread: p.request.thread, kind: "human", author: p.author,
+      content: p.request.content, createdAt: p.createdAt, delivery: p.state, deliveryError: p.error, requestId: p.id }));
+  const messages = [...data.messages.filter((m) => m.space === spaceId && channelOf(m) === channelId && m.thread === threadId), ...pending];
   const cards = threadId ? [] : generalThreadCards();
   const jobs = data.jobs.filter((j) => j.thread === threadId && ["queued", "running"].includes(j.status));
   const needsPerson = thread && ["waiting", "paused"].includes(thread.status);
@@ -184,7 +206,7 @@ function renderChat() {
   const following = data.threadSubscriptions?.some((f) => f.thread === threadId && f.following) ?? false;
   $("follow-thread").textContent = following ? "✓ Вы подписаны на тред" : "Подписаться на тред";
   $("follow-thread").setAttribute("aria-pressed", String(following));
-  const key = JSON.stringify([spaceId, channelId, threadId, messages, cards, thread?.memory, data.employees, data.agents.map((a) => [a.id, a.name, a.owner]), data.jobs.filter((j) => j.thread === threadId).map((j) => [j.id,j.status])]);
+  const key = JSON.stringify([spaceId, channelId, threadId, messages, cards, thread?.memory, data.employees, data.agents.map((a) => [a.id, a.name, a.owner]), data.jobs.filter((j) => j.thread === threadId).map((j) => [j.id,j.status,Boolean(j.diagnostic)])]);
   if (key === renderKey) return;
   const wasNearBottom = $("messages").scrollHeight - $("messages").scrollTop - $("messages").clientHeight < 110;
   const switched = !renderKey; renderKey = key;
@@ -194,11 +216,14 @@ function renderChat() {
   $("messages").innerHTML = entries.map((entry) => {
     if (entry.card) return renderThreadCard(entry.card);
     const m = entry.message;
-    if (m.kind === "system") return `<div class="system">${inline(m.content)}</div>`;
+    if (m.kind === "system") return `<div class="system">${inline(m.content)}${m.diagnosticJob ? (data.jobs.some((j) => j.id === m.diagnosticJob && j.diagnostic) ? ` <button class="quiet diagnostic-button" data-diagnostic="${esc(m.diagnosticJob)}">Подробности ошибки</button>` : '<br><small>Подробности доступны владельцу агента / оператору хаба, если срок хранения не истёк.</small>') : ""}</div>`;
     const agent = data.agents.find((a) => a.id === m.author);
-    return `<article class="message ${m.kind}"><span class="avatar">${esc(initials(name(m.author)))}</span><div class="message-main"><div class="message-head"><strong>${esc(name(m.author))}</strong>${agent ? `<span class="agent-tag">АГЕНТ · ${esc(name(agent.owner))}</span>` : ""}<time>${time(m.createdAt)}</time></div><div class="message-body">${markdown(m.content)}</div></div></article>`;
+    const delivery = m.delivery === "sending" ? '<span class="delivery sending" role="status">Отправляется…</span>' : m.delivery === "failed" ? '<span class="delivery failed" role="status">Отправка не подтверждена</span>' : m.author === data.me.id && m.kind === "human" ? '<span class="delivery sent" title="Принято хабом — это не отметка о прочтении">✓ Отправлено</span>' : '';
+    return `<article class="message ${m.kind} ${m.delivery ?? ''}" data-message="${esc(m.id)}"><span class="avatar">${esc(initials(name(m.author)))}</span><div class="message-main"><div class="message-head"><strong>${esc(name(m.author))}</strong>${agent ? `<span class="agent-tag">АГЕНТ · ${esc(name(agent.owner))}</span>` : ""}<time>${time(m.createdAt)}</time>${delivery}</div><div class="message-body">${markdown(m.content)}</div>${m.delivery === 'failed' ? `<div class="delivery-error">${esc(m.deliveryError)} <button type="button" class="quiet" data-retry="${esc(m.requestId)}">Повторить отправку</button><small>Повтор использует тот же идентификатор и не запускает агента второй раз. Сообщение остаётся здесь, пока приложение открыто.</small></div>` : ''}</div></article>`;
   }).join("") || `<div class="empty"><div class="symbol">${space ? "↗" : "✳"}</div><h3>${space ? "Начните с вопроса" : "Команда начинается со спейса"}</h3><p>${space ? "Напишите коллеге или вызовите агента через @. Он увидит историю этого треда и сможет подключить другого агента." : "Создайте пространство, добавьте коллег и подключите своих агентов. Никаких заданных ролей."}</p></div>`;
   $("messages").querySelectorAll("[data-open-thread]").forEach((button) => button.onclick = () => navigate(spaceId, button.dataset.openThread));
+  $("messages").querySelectorAll("[data-diagnostic]").forEach((button) => button.onclick = () => showDiagnostic(button.dataset.diagnostic));
+  $("messages").querySelectorAll("[data-retry]").forEach((button) => button.onclick = () => { const pending = outbox.get(button.dataset.retry); if (pending) void deliverPost(pending); });
   const contextJobs = data.jobs.filter((j) => j.thread === threadId && j.contextStats);
   if (thread && (thread.memory || contextJobs.length)) {
     const panel = document.createElement("details"); panel.className = "context-memory";
@@ -241,22 +266,43 @@ function showMentions(forced = false) {
   });
 }
 function encodeMentions(text) { for (const option of mentionOptions()) text = text.split(option.insert).join(`@{${option.kind}:${option.id}}`); return text; }
-$("composer").addEventListener("input", () => { draftRequest = null; showMentions(); });
+$("composer").addEventListener("input", () => showMentions());
 $("composer").addEventListener("keydown", (event) => { if (event.key === "Escape") $("mention-picker").classList.add("hidden"); if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); $("composer-form").requestSubmit(); } });
 $("mention-button").onclick = () => { $("composer").focus(); showMentions(true); };
+function queuePost(request) {
+  const pending = { id: crypto.randomUUID(), author: data.me.id, hub: appState.settings.url, request, channel: channelId,
+    createdAt: Date.now(), state: "queued", error: "", result: null };
+  outbox.set(pending.id, pending);
+  void deliverPost(pending);
+}
+async function deliverPost(pending) {
+  if (pending.state === "sending") return;
+  pending.state = "sending"; pending.error = ""; renderChat();
+  $("messages").scrollTop = $("messages").scrollHeight;
+  try {
+    const result = await window.hub.call("post", { ...pending.request, requestId: pending.id });
+    if (data?.me.id !== pending.author || appState.settings.url !== pending.hub) return;
+    pending.result = result; pending.state = "sent";
+    if (data.spaces.some((s) => s.id === pending.request.space)) {
+      if (result.thread && !data.threads.some((t) => t.id === result.thread.id)) data.threads.push(result.thread);
+      if (result.message && !data.messages.some((m) => m.id === result.message.id)) data.messages.push(result.message);
+      // Do not redirect someone who switched channels or started their next draft.
+      if (!pending.request.thread && result.thread && spaceId === pending.request.space && channelId === pending.channel && !threadId && !$("composer").value) navigate(spaceId, result.thread.id, pending.channel);
+    }
+  } catch (error) {
+    pending.state = "failed"; pending.error = errorText(error);
+    if (!outbox.has(pending.id)) return; // A poll already confirmed acceptance.
+    if (spaceId !== pending.request.space || channelId !== pending.channel) toast("Отправка сообщения не подтверждена. Оно сохранено в исходном чате с кнопкой повтора.");
+  }
+  if (data?.me.id === pending.author && appState.settings.url === pending.hub) { renderTopics(); renderChat(); }
+}
 $("composer-form").onsubmit = (event) => {
-  event.preventDefault(); void safely(async () => {
-    const content = encodeMentions($("composer").value.trim()); if (!content) return;
-    if (currentChannel()?.archived) throw new Error("Канал в архиве");
-    const request = { space: spaceId, ...(channelSupport ? { channel: channelId } : {}), thread: threadId, content, mode: $("mode").value };
-    const key = JSON.stringify(request); if (!draftRequest || draftRequest.key !== key) draftRequest = { key, id: crypto.randomUUID() };
-    $("send").disabled = true;
-    try {
-      const result = await window.hub.call("post", { ...request, requestId: draftRequest.id });
-      $("composer").value = ""; drafts.delete(draftKey()); draftRequest = null;
-      if (!threadId && result.thread) navigate(spaceId, result.thread.id);
-    } finally { $("send").disabled = currentChannel()?.archived || !appState.connected; }
-  }, "send-error");
+  event.preventDefault();
+  const content = encodeMentions($("composer").value.trim()); if (!content) return;
+  if (!spaceId || !appState.connected || currentChannel()?.archived) { $("send-error").textContent = "Нет подключения к хабу или канал в архиве. Текст сохранён в поле ввода."; return; }
+  const request = { space: spaceId, ...(channelSupport ? { channel: channelId } : {}), thread: threadId, content, mode: $("mode").value };
+  $("composer").value = ""; drafts.delete(draftKey()); $("send-error").textContent = ""; $("mention-picker").classList.add("hidden");
+  queuePost(request); $("composer").focus();
 };
 $("general").onclick = () => navigate(spaceId, null, channelId);
 $("thread-actions").prepend($("follow-thread"));
@@ -266,7 +312,11 @@ $("new-thread").onclick = () => {
   if (!spaceId) return toast("Сначала создайте спейс");
   if (currentChannel()?.archived) return toast("Сначала восстановите канал из архива");
   openModal("Новый тред", '<form id="thread-form"><label>Тема<input id="thread-title" required maxlength="160" placeholder="Например: контракт новой геймификации"></label><label>С чего начнём?<textarea id="thread-message" rows="5" required placeholder="Опишите вопрос, добавьте ссылки на Jira, Confluence или PR"></textarea></label><p class="hint">После создания вызовите нужного агента через @ в строке сообщения.</p><div class="modal-actions"><button class="primary">Создать тред</button></div></form>');
-  $("thread-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { const result = await window.hub.call("post", { space: spaceId, ...(channelSupport ? { channel: channelId } : {}), title: $("thread-title").value, content: $("thread-message").value, newThread: true }); closeModal(); navigate(spaceId, result.thread.id); }); };
+  $("thread-form").onsubmit = (e) => { e.preventDefault();
+    if (!appState.connected || currentChannel()?.archived) { $("modal-error").textContent = "Нет подключения или канал в архиве. Текст не отправлен."; return; }
+    const request = { space: spaceId, ...(channelSupport ? { channel: channelId } : {}), title: $("thread-title").value, content: $("thread-message").value, newThread: true };
+    closeModal(); navigate(spaceId, null, channelId); queuePost(request);
+  };
 };
 $("add-space").onclick = () => editSpace(false);
 $("members").onclick = () => editSpace(true);
@@ -292,7 +342,16 @@ function editAgent(id) {
   const input = () => ({ id: agent?.id ?? "", name: $("agent-name").value, executor: $("agent-executor").value, directory: $("agent-directory").value, description: $("agent-description").value, binary: $("agent-binary").value, fallback: $("agent-fallback").value || null, enabled: $("agent-enabled").checked, allowWrite: $("agent-write").checked });
   $("choose-directory").onclick = async () => { const path = await window.hub.directory(); if (path) $("agent-directory").value = path; };
   $("choose-binary").onclick = async () => { const path = await window.hub.binary(); if (path) $("agent-binary").value = path; };
-  $("check-agent").onclick = () => void safely(async () => { $("agent-health").textContent = "Проверяем папку, установку и авторизацию…"; $("check-agent").disabled = true; try { const result = await window.hub.checkAgent(input()); $("agent-health").textContent = `✓ ${result.detail}`; } finally { $("check-agent").disabled = false; } });
+  $("check-agent").onclick = () => void safely(async () => {
+    const output = $("agent-health"), button = $("check-agent");
+    output.textContent = "Проверяем папку, установку и авторизацию…"; button.disabled = true;
+    try {
+      const result = await window.hub.checkAgent(input());
+      if (!output.isConnected) return;
+      output.innerHTML = `${result.ok === false ? '✕' : '✓'} ${esc(result.detail)}${result.diagnostic ? `<details><summary>Подробности ошибки</summary>${diagnosticHtml(result.diagnostic)}</details>` : ''}`;
+    } catch (error) { if (output.isConnected) output.textContent = `✕ ${errorText(error)}`; }
+    finally { button.disabled = false; }
+  });
   $("agent-form").onsubmit = (e) => { e.preventDefault(); void safely(async () => { await window.hub.saveAgent(input()); closeModal(); toast("Агент сохранён. Проверяем готовность раннера."); }); };
 }
 $("settings").onclick = () => {
