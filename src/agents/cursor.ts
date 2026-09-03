@@ -76,7 +76,8 @@ export class CursorAdapter implements AgentAdapter {
     ].join("\n");
     const args = [
       "--print",
-      ...(writeMode ? ["--force", "--mode=agent"] : ["--mode=ask"]),
+      "--trust",
+      ...(writeMode ? ["--force"] : ["--mode=ask"]),
       "--output-format",
       "json",
       prompt,
@@ -90,7 +91,7 @@ export class CursorAdapter implements AgentAdapter {
     }
     const content = parsed?.result?.trim() || result.stdout.trim();
     if (result.exitCode !== 0 || parsed?.is_error || !content) {
-      throw new Error(parsed?.result?.trim() || result.stderr.trim() || `Cursor CLI exited with code ${result.exitCode}`);
+      throw new Error(parsed?.result?.trim() || result.stderr.trim() || result.stdout.trim() || `Cursor CLI exited with code ${result.exitCode}`);
     }
     return { agent: this.id, content, ...(parsed?.session_id ? { sessionId: parsed.session_id } : {}) };
   }

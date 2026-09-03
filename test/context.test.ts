@@ -67,12 +67,13 @@ it("keeps variable archive paths after reusable history and makes all omissions 
   expect(compactionPlan({ ...packet, skipCompaction: true })).toBeUndefined();
 });
 
-it("uses a read-only task file for oversized Windows arguments and cleans it up", async () => {
+it("uses a read-only task file for agent arguments and cleans it up", async () => {
   const text = "Full request: ".repeat(3000);
-  const posix = await promptArgument(text, "darwin"); expect(posix.prompt).toBe(text);
-  const result = await promptArgument(text, "win32");
-  expect(result.prompt.length).toBeLessThan(1500);
-  const path = JSON.parse(result.prompt.match(/UTF-8 file (".*?")\./)![1]!) as string;
-  expect(await readFile(path, "utf8")).toBe(text);
-  await result.cleanup(); await expect(stat(path)).rejects.toThrow();
+  for (const platform of ["darwin", "win32"] as const) {
+    const result = await promptArgument(text, platform);
+    expect(result.prompt.length).toBeLessThan(1500);
+    const path = JSON.parse(result.prompt.match(/UTF-8 file (".*?")\./)![1]!) as string;
+    expect(await readFile(path, "utf8")).toBe(text);
+    await result.cleanup(); await expect(stat(path)).rejects.toThrow();
+  }
 });
