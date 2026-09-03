@@ -1,4 +1,8 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.10.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.11.
+
+New in 0.2.11:
+
+- Hotfix for a Mac first-launch race: an activation event can no longer reveal the initial empty window before the sandboxed renderer has loaded. The app shows and focuses the window only after its real document is ready. No coordinator, data or routing migration is needed.
 
 New in 0.2.10:
 

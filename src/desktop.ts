@@ -23,6 +23,7 @@ type Settings = {
 let settings: Settings;
 let configPath = "";
 let window: BrowserWindow | undefined;
+let windowReady = false;
 let tray: Tray | undefined;
 let client: CollaborationClient | undefined;
 let snapshot: Snapshot | undefined;
@@ -58,7 +59,10 @@ if (profileIndex >= 0) {
 if (!process.argv.includes("--smoke-test") && !app.requestSingleInstanceLock()) app.exit(0);
 app.on("second-instance", () => show());
 
-function show(): void { window?.show(); window?.focus(); }
+function show(): void {
+  if (!windowReady) return;
+  window?.show(); window?.focus();
+}
 function state(): unknown {
   return { connected: Boolean(snapshot) && !connectionError, error: connectionError, snapshot,
     settings: { url: settings.url, device: settings.device, notifications: settings.notifications, local: settings.local, agents: settings.agents, theme: settings.theme },
@@ -257,12 +261,13 @@ async function createWindow(): Promise<void> {
   // Commit the real document before showing a window or initializing native menus.
   // A visible initial about:blank could race Electron's sandbox startup data.
   await window.loadFile(join(app.getAppPath(), "ui/hub.html"));
+  windowReady = true;
   const icon = nativeImage.createFromDataURL("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAPUlEQVQ4T2NkoBAwUqifYdQABob/DP8ZGBgYRsQAkgxgYWBg+M/AwMDIyMjAYBaMFoAwNoBmgiEwGg0YBgYGABX6DBGTIWcAAAAASUVORK5CYII=");
   tray = new Tray(icon); tray.setToolTip("Agent Hub — агенты работают, пока приложение запущено");
   tray.setContextMenu(Menu.buildFromTemplate([{ label: "Открыть Agent Hub", click: show }, { label: "Выйти и остановить агентов", click: () => app.quit() }]));
   tray.on("click", show);
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: "Agent Hub", submenu: [{ label: "Открыть", click: show }, { role: "quit", label: "Выйти и остановить агентов" }] }, { role: "editMenu" }, { role: "viewMenu" }]));
-  if (!quitting) window.show();
+  if (!quitting) show();
 }
 
 void app.whenReady().then(async () => {
