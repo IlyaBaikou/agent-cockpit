@@ -1,4 +1,11 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.12.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.13.
+
+New in 0.2.13:
+
+- Desktop clients keep an authenticated SSE connection to the coordinator. Successful mutations trigger an immediate access-filtered sync instead of waiting for the previous three-second polling cycle, and wake local runners so newly queued agent work does not wait for their five-second fallback poll. A 30-second UI sync remains as recovery and SSE reconnects with bounded backoff.
+- Human typing presence is shown only in the exact space/channel/thread. Presence expires after five seconds, is never persisted, never enters model context and does not invoke an agent. Existing job status remains the indicator for agent work.
+- Message submission still uses acknowledged HTTPS POST and the existing idempotent outbox. SSE carries only invalidation and ephemeral presence, not message bodies. Remote clients need no inbound port or VPN.
+- The pilot coordinator must remain single-replica because its SSE subscriber list and presence are process-local. Add a shared event bus (for example PostgreSQL LISTEN/NOTIFY plus a presence transport) before horizontal scaling. Update coordinator first, then desktops; no PostgreSQL migration or credential change is required.
 
 New in 0.2.12:
 

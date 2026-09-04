@@ -9,9 +9,26 @@ export async function collaborationHttp(service: CollaborationService, request: 
     response.end(JSON.stringify(value));
   };
   try {
-    requireValue(request.method === "POST", "Method not allowed", 405);
     // No browser cookies, CORS or ambient authentication: only explicit bearer credentials.
     requireValue(!request.headers.origin, "Browser cross-origin requests are not allowed", 403);
+    if (request.method === "GET" && request.url === "/v2/events") {
+      let open = true;
+      const unsubscribe = await service.subscribe(bearerToken(request.headers.authorization), (event) => {
+        if (open && !response.destroyed) response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      });
+      response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform",
+        connection: "keep-alive", "x-accel-buffering": "no", "x-content-type-options": "nosniff" });
+      response.flushHeaders();
+      response.write(`retry: 2000\nevent: ready\ndata: {"type":"ready"}\n\n`);
+      const keepalive = setInterval(() => { if (open && !response.destroyed) response.write(": keepalive\n\n"); }, 15_000);
+      keepalive.unref();
+      await new Promise<void>((resolve) => {
+        const close = (): void => { if (!open) return; open = false; clearInterval(keepalive); unsubscribe(); resolve(); };
+        request.once("aborted", close); response.once("close", close);
+      });
+      return;
+    }
+    requireValue(request.method === "POST", "Method not allowed", 405);
     let size = 0;
     const chunks: Buffer[] = [];
     for await (const chunk of request) {
@@ -23,6 +40,9 @@ export async function collaborationHttp(service: CollaborationService, request: 
     if (request.url === "/v2/enroll") {
       requireValue(typeof body.code === "string" && body.code.length <= 200, "Invalid invite");
       send(200, await service.enroll(body.code, body.name));
+    } else if (request.url === "/v2/typing") {
+      await service.typing(bearerToken(request.headers.authorization), body);
+      send(200, { ok: true });
     } else {
       requireValue(request.url === "/v2/rpc" && typeof body.op === "string", "Not found", 404);
       requireValue(!body.input || (typeof body.input === "object" && !Array.isArray(body.input)), "Invalid input");

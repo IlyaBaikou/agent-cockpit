@@ -10,7 +10,7 @@ import { EmployeeRunner, checkLocalAgent, type LocalAgent } from "./collab/runne
 import { SqliteStateStore } from "./collab/store.js";
 import { CollaborationService } from "./collab/service.js";
 import { collaborationHttp } from "./collab/http.js";
-import { field, requireValue, type Agent, type Snapshot } from "./collab/model.js";
+import { field, requireValue, type Agent, type LiveEvent, type Snapshot } from "./collab/model.js";
 import { pendingNotices } from "./collab/notifications.js";
 import { probeNotification } from "./notification-probe.js";
 import { decodeInvitation, encodeInvitation } from "./collab/invitations.js";
@@ -33,6 +33,11 @@ let syncing: Promise<void> | undefined;
 let localServer: Server | undefined;
 let localStore: SqliteStateStore | undefined;
 let poll: NodeJS.Timeout | undefined;
+let typingSweep: NodeJS.Timeout | undefined;
+let eventsAbort: AbortController | undefined;
+let realtime = false;
+const typingPresence = new Map<string, Extract<LiveEvent, { type: "typing" }>>();
+const typingVersions = new Map<string, number>();
 const runners = new Map<string, EmployeeRunner>();
 const health = new Map<string, { ready: boolean; detail: string; diagnostic?: AgentDiagnostic }>();
 let saveQueue = Promise.resolve();
@@ -66,7 +71,8 @@ function show(): void {
 function state(): unknown {
   return { connected: Boolean(snapshot) && !connectionError, error: connectionError, snapshot,
     settings: { url: settings.url, device: settings.device, notifications: settings.notifications, local: settings.local, agents: settings.agents, theme: settings.theme },
-    health: Object.fromEntries(health), notificationsSupported: Notification.isSupported(), version: app.getVersion() };
+    health: Object.fromEntries(health), notificationsSupported: Notification.isSupported(), version: app.getVersion(), realtime,
+    typing: [...typingPresence.values()].filter((entry) => entry.active && entry.expiresAt > Date.now()) };
 }
 function changed(): void { window?.webContents.send("hub:changed", state()); }
 function save(): Promise<void> {
@@ -150,6 +156,53 @@ async function performSync(): Promise<void> {
   } catch (error) { connectionError = error instanceof Error ? error.message : String(error); changed(); }
 }
 
+function stopEvents(): void {
+  eventsAbort?.abort(); eventsAbort = undefined; realtime = false;
+  typingPresence.clear(); typingVersions.clear();
+}
+function waitForRetry(milliseconds: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolvePromise) => {
+    if (signal.aborted) return resolvePromise();
+    const done = (): void => { clearTimeout(timer); signal.removeEventListener("abort", done); resolvePromise(); };
+    const timer = setTimeout(done, milliseconds);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+function receiveLiveEvent(event: LiveEvent): void {
+  if (event.type === "ready") { realtime = true; changed(); return; }
+  if (event.type === "change") {
+    void sync(true).then(() => { for (const runner of runners.values()) runner.wake(); });
+    return;
+  }
+  if (event.employee === snapshot?.me.id) return;
+  const previous = typingVersions.get(event.employee) ?? 0;
+  if (event.version < previous) return;
+  typingVersions.set(event.employee, event.version);
+  if (event.active && event.expiresAt > Date.now()) typingPresence.set(event.employee, event);
+  else typingPresence.delete(event.employee);
+  changed();
+}
+function startEvents(): void {
+  stopEvents();
+  const source = client;
+  if (!source || quitting) return;
+  const controller = new AbortController(); eventsAbort = controller;
+  void (async () => {
+    let retry = 500;
+    while (!controller.signal.aborted && client === source && !quitting) {
+      try {
+        await source.events(controller.signal, (event) => { retry = 500; receiveLiveEvent(event); });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.warn("Realtime event stream disconnected", error instanceof Error ? error.message : String(error));
+      }
+      if (controller.signal.aborted) return;
+      realtime = false; typingPresence.clear(); changed();
+      await waitForRetry(retry, controller.signal); retry = Math.min(5_000, retry * 2);
+    }
+  })();
+}
+
 function handlers(): void {
   const register = (name: string, handler: (...args: any[]) => unknown): void => {
     ipcMain.handle(name, (event, ...args) => {
@@ -170,15 +223,19 @@ function handlers(): void {
     const token = input.type === "invite" ? (await candidate.enroll(credential, input.name)).token : credential;
     const connected = new CollaborationClient(url, token);
     const result = await connected.call<Snapshot>("sync", { channelVersion: 1 });
-    await stopRunners();
+    await stopRunners(); stopEvents();
     settings.url = connected.url; settings.token = token; settings.local = false; settings.cursor = null;
     await save(); client = connected; snapshot = result;
-    await sync(true); return state();
+    await sync(true); startEvents(); return state();
   });
   register("hub:local", async () => {
     requireValue(!settings.url, "Хаб уже подключён");
     settings.token = randomBytes(32).toString("hex"); settings.local = true;
-    await startLocal(); await save(); client = new CollaborationClient(settings.url, settings.token); await sync(); return state();
+    await startLocal(); await save(); client = new CollaborationClient(settings.url, settings.token); await sync(); startEvents(); return state();
+  });
+  register("hub:typing", async (input: { space: string; channel: string; thread: string | null; active: boolean; version: number }) => {
+    requireValue(client && snapshot, "Сначала подключитесь к хабу");
+    await client.typing(input);
   });
   register("hub:call", async (op: string, input: Record<string, unknown>) => {
     requireValue(client && ["post", "space", "members", "thread-state", "profile", "revoke-invite", "channel", "channel-state", "channel-preference", "thread-subscription", "participation", "read", "notices"].includes(op), "Недоступная операция");
@@ -304,7 +361,13 @@ void app.whenReady().then(async () => {
     await load(); if (settings.local) await startLocal();
     await createWindow();
     if (settings.url) client = new CollaborationClient(settings.url, settings.token);
-    await sync(); poll = setInterval(() => void sync(), 3000);
+    await sync(); startEvents();
+    poll = setInterval(() => void sync(), 30_000);
+    typingSweep = setInterval(() => {
+      let expired = false;
+      for (const [employee, entry] of typingPresence) if (entry.expiresAt <= Date.now()) { typingPresence.delete(employee); expired = true; }
+      if (expired) changed();
+    }, 1_000);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (process.argv.includes("--smoke-test")) console.error(message);
@@ -315,7 +378,7 @@ void app.whenReady().then(async () => {
 app.on("activate", show);
 app.on("before-quit", (event) => {
   if (quitting) return; event.preventDefault(); quitting = true;
-  clearInterval(poll); void stopRunners();
+  clearInterval(poll); clearInterval(typingSweep); stopEvents(); void stopRunners();
   localServer?.close(); void localStore?.close();
   void saveQueue.finally(() => setTimeout(() => app.exit(0), 2500));
 });

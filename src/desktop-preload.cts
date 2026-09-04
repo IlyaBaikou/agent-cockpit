@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("hub", {
   connect: (input: unknown) => ipcRenderer.invoke("hub:connect", input),
   local: () => ipcRenderer.invoke("hub:local"),
   call: (op: string, input: unknown) => ipcRenderer.invoke("hub:call", op, input),
+  typing: (input: unknown) => ipcRenderer.invoke("hub:typing", input),
   saveAgent: (input: unknown) => ipcRenderer.invoke("hub:agent", input),
   checkAgent: (input: unknown) => ipcRenderer.invoke("hub:check", input),
   directory: () => ipcRenderer.invoke("hub:directory"),

@@ -28,6 +28,7 @@ export async function checkLocalAgent(agent: LocalAgent): Promise<string> {
 export class EmployeeRunner extends EventEmitter {
   #timer: NodeJS.Timeout | undefined;
   #busy = false;
+  #wakePending = false;
   #stopped = false;
   #abort: AbortController | undefined;
   #lastHealth = 0;
@@ -38,7 +39,8 @@ export class EmployeeRunner extends EventEmitter {
   constructor(private client: CollaborationClient, readonly agent: LocalAgent, private device: string, private worktreesRoot: string,
     private dependencies = { check: checkLocalAgent, adapter: adapterFor }, private appVersion = "не определена") { super(); }
   start(): void { void this.tick(); this.#timer = setInterval(() => void this.tick(), 5000); }
-  stop(): void { this.#stopped = true; clearInterval(this.#timer); this.#abort?.abort(); }
+  wake(): void { if (this.#busy) this.#wakePending = true; else void this.tick(); }
+  stop(): void { this.#stopped = true; this.#wakePending = false; clearInterval(this.#timer); this.#abort?.abort(); }
   private async tick(): Promise<void> {
     if (this.#busy || this.#stopped || !this.agent.enabled) return;
     this.#busy = true;
@@ -61,7 +63,10 @@ export class EmployeeRunner extends EventEmitter {
       if (result.job && (result.participationVersion !== 1 || !result.job.authorization)) throw new Error("Координатор не подтвердил разрешение на запуск. Обновите хаб до 0.2.7.");
       if (result.job && result.prompt) await this.execute(result.job, result.prompt, result.context);
     } catch (error) { this.emit("health", { id: this.agent.id, ready: false, detail: error instanceof Error ? error.message : String(error) }); }
-    finally { this.#busy = false; }
+    finally {
+      this.#busy = false;
+      if (this.#wakePending && !this.#stopped) { this.#wakePending = false; queueMicrotask(() => void this.tick()); }
+    }
   }
   private async execute(job: Job, prompt: string, packet?: ContextPacket): Promise<void> {
     this.#abort = new AbortController();

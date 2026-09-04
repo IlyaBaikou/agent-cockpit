@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { secureTokenMatch, type ControlCredential } from "../control-auth.js";
-import { CollabError, field, generalChannelId, mentions, requireValue, type Agent, type Channel, type GroupInvitation, type Job, type Message, type Participation, type Snapshot, type Space, type State, type Thread } from "./model.js";
+import { CollabError, field, generalChannelId, mentions, requireValue, type Agent, type Channel, type GroupInvitation, type Job, type LiveEvent, type Message, type Participation, type Snapshot, type Space, type State, type Thread } from "./model.js";
 import { makeGeneralChannel, migrateChannels } from "./channels.js";
 import { manageNotices, markRead, migrateReadState } from "./read-state.js";
 import { addressReply } from "./addressing.js";
@@ -17,10 +17,11 @@ const QUEUE_WAIT = 120_000;
 const bool = (value: unknown): boolean => value === true;
 
 export class CollaborationService {
+  private subscribers = new Map<symbol, { actor: string; receive: (event: LiveEvent) => void }>();
   constructor(readonly store: StateStore, private credentials: ControlCredential[] = [], private now = Date.now) {}
 
   async enroll(code: string, name?: unknown): Promise<{ token: string; employee: string }> {
-    return this.store.transact((s) => {
+    const result = await this.store.transact((s) => {
       migrateChannels(s);
       const group = s.groupInvitations?.find((i) => secureTokenMatch(i.hash, hash(code)));
       if (group) {
@@ -38,6 +39,8 @@ export class CollaborationService {
       s.invitations = s.invitations.filter((i) => i !== invite);
       return { token, employee: invite.employee };
     });
+    this.publish({ type: "change" });
+    return result;
   }
 
   async call(token: string, op: string, input: Record<string, unknown> = {}): Promise<unknown> {
@@ -55,7 +58,7 @@ export class CollaborationService {
       });
       if (preview.fast) return preview.result;
     }
-    return this.store.transact((s) => {
+    const result = await this.store.transact((s) => {
       const actor = this.authenticate(s, token);
       migrateChannels(s);
       migrateReadState(s);
@@ -74,6 +77,39 @@ export class CollaborationService {
       }
       return result;
     });
+    const liveHeartbeat = op === "heartbeat" && Boolean((result as { changed?: boolean })?.changed);
+    if (!["sync", "heartbeat", "lease"].includes(op) || liveHeartbeat || (op === "lease" && input.started === true)) this.publish({ type: "change" });
+    return result;
+  }
+
+  async subscribe(token: string, receive: (event: LiveEvent) => void): Promise<() => void> {
+    const actor = await this.store.read((s) => this.authenticate(s, token));
+    const id = Symbol(actor);
+    this.subscribers.set(id, { actor, receive });
+    return () => { this.subscribers.delete(id); };
+  }
+
+  async typing(token: string, input: Record<string, unknown>): Promise<void> {
+    const delivery = await this.store.read((s): { event: Extract<LiveEvent, { type: "typing" }>; members: string[] } => {
+      const actor = this.authenticate(s, token);
+      const space = this.space(s, actor, input.space);
+      const channel = this.channel(s, actor, input.channel);
+      requireValue(channel.space === space.id && !channel.archived, "Канал недоступен", 403);
+      const thread = input.thread === null || input.thread === undefined ? null : this.thread(s, actor, input.thread);
+      requireValue(!thread || (thread.space === space.id && (thread.channel ?? generalChannelId(space.id)) === channel.id), "Тред относится к другому каналу");
+      requireValue(typeof input.active === "boolean", "Неверный статус набора");
+      requireValue(typeof input.version === "number" && Number.isSafeInteger(input.version) && input.version > 0, "Неверная версия статуса");
+      return { event: { type: "typing", employee: actor, space: space.id, channel: channel.id, thread: thread?.id ?? null,
+        active: input.active, expiresAt: input.active ? this.now() + 5_000 : this.now(), version: input.version }, members: space.members };
+    });
+    this.publish(delivery.event, new Set(delivery.members));
+  }
+
+  private publish(event: LiveEvent, recipients?: Set<string>): void {
+    for (const subscriber of this.subscribers.values()) {
+      if (recipients && !recipients.has(subscriber.actor)) continue;
+      try { subscriber.receive(event); } catch { /* A closed HTTP stream removes itself on close. */ }
+    }
   }
 
   private authenticate(s: State, token: string): string {
@@ -234,14 +270,16 @@ export class CollaborationService {
       case "heartbeat": {
         const agent = this.ownedAgent(s, actor, b.agent, b.device);
         const diagnostic = !bool(b.ready) ? acceptDiagnostic(b.diagnostic, agent.executor, this.now()) : undefined;
+        const detail = diagnostic ? diagnosticMessage(diagnostic) : typeof b.detail === "string" ? redact(b.detail).slice(0, 500) : "";
+        const changed = agent.ready !== bool(b.ready) || agent.detail !== detail || Boolean(agent.diagnostic) !== Boolean(diagnostic);
         if (diagnostic) agent.diagnostic = diagnostic; else delete agent.diagnostic;
-        agent.seenAt = this.now(); agent.ready = bool(b.ready); agent.detail = diagnostic ? diagnosticMessage(diagnostic) : typeof b.detail === "string" ? redact(b.detail).slice(0, 500) : "";
+        agent.seenAt = this.now(); agent.ready = bool(b.ready); agent.detail = detail;
         if (!agent.ready) for (const job of s.jobs.filter((j) => j.agent === agent.id && j.status === "queued")) {
           if (diagnostic) job.diagnostic = diagnostic;
           this.fallback(s, job, agent.detail || "Локальный исполнитель недоступен");
         }
         this.pruneDiagnostics(s);
-        return { ok: true };
+        return { ok: true, changed };
       }
       case "post": return this.post(s, actor, b);
       case "read": return markRead(s, actor, b);

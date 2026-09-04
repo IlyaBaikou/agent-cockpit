@@ -27,12 +27,14 @@ const snapshot = {
 };
 snapshot.messages.forEach((m, i) => { m.seq = i + 1; });
 const settings = { agents: [], local: false, url: "https://hub.example", theme: "system", notifications: true };
-const state = () => ({ snapshot, connected: true, version: "0.2.7", settings });
+let typing = [];
+const state = () => ({ snapshot, connected: true, realtime: true, typing, version: "0.2.7", settings });
 let changed = () => {};
 const calls = [];
 let messageSequence = 0;
 contextBridge.exposeInMainWorld("hub", {
   onChanged: (callback) => { changed = callback; }, onNavigate: () => {}, state: async () => state(),
+  typing: async (input) => { calls.push({ op: "typing", input }); },
   preferences: async (input) => { calls.push({ op: "preferences", input }); Object.assign(settings, input); changed(state()); },
   invite: async (input) => { calls.push({ op: "invite", input }); return { copied: true }; },
   joinInvite: async (input) => { calls.push({ op: "joinInvite", input }); return { space: "demo-space" }; },
@@ -95,4 +97,5 @@ contextBridge.exposeInMainWorld("hub", {
     return { status: behavior.unconfirmed ? 'unconfirmed' : 'accepted', detail: behavior.unconfirmed ? 'Доставка не подтверждена.' : 'Система приняла тестовое уведомление.' };
   },
   testSetSnapshot: (value) => { Object.assign(snapshot, value); changed(state()); },
+  testSetTyping: (value) => { typing = value; changed(state()); },
 });

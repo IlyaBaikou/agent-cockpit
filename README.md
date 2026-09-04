@@ -34,6 +34,10 @@ Long threads use shared working summaries, recent messages and on-demand origina
 
 Read [the full pilot guide](docs/COLLABORATION-MVP.md) for routing, trust boundaries, background operation and deferred corporate features.
 
+## Realtime delivery and typing (0.2.13)
+
+Desktop clients receive change signals over an authenticated server-sent event stream and immediately refresh their access-filtered view. Messages still use acknowledged, idempotent HTTPS POST; a 30-second sync remains as recovery after network/proxy interruptions. Human typing presence is scoped to the exact conversation, expires after five seconds, is not persisted and never enters model context. This pilot transport assumes one coordinator replica; add a shared event bus before horizontal scaling. See [architecture](ARCHITECTURE.md) for the protocol and rollout notes.
+
 ## Agent mentions and handoffs (0.2.8)
 
 Agent replies visibly tag the person who should respond or the next agent. Human tags create notifications; a single peer tag hands off in the same thread, subject to owner approval and the remaining budget. The coordinator also adds missing tags from existing `ROUTE` directives. Code examples and quotes never call agents; conflicting/multiple targets stop with a visible error. Click a tag to prepare a reply, without sending it automatically. See [architecture](ARCHITECTURE.md) for the exact addressing and notification rules.

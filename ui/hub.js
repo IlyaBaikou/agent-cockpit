@@ -10,6 +10,7 @@ const decisionsInFlight = new Set();
 const readsInFlight = new Map();
 let invitationView = null;
 const drafts = new Map();
+let typingActive = false, typingContext = null, typingStopTimer = 0, typingLastSent = 0, typingVersion = Date.now();
 const name = (id) => data?.agents.find((a) => a.id === id)?.name ?? data?.employees.find((e) => e.id === id)?.name ?? "Agent Hub";
 const initials = (s) => s.split(/[\s/-]+/).slice(0, 2).map((p) => p[0] ?? "").join("").toUpperCase();
 const status = (s) => `<span class="status ${esc(s)}">${labels[s] ?? esc(s)}</span>`;
@@ -134,7 +135,7 @@ document.addEventListener("change", (event) => {
   void window.hub.preferences({ theme: selected }).catch((error) => { applyTheme(before); toast(errorText(error)); });
 });
 function receive(value) {
-  if (data?.me.id && (value.snapshot?.me.id !== data.me.id || value.settings.url !== appState.settings.url)) { outbox.clear(); drafts.clear(); readsInFlight.clear(); }
+  if (data?.me.id && (value.snapshot?.me.id !== data.me.id || value.settings.url !== appState.settings.url)) { stopTyping(); outbox.clear(); drafts.clear(); readsInFlight.clear(); }
   appState = value; data = value.snapshot;
   if (data) {
     for (const [id, pending] of outbox) {
@@ -181,6 +182,7 @@ function renderSidebar() {
 }
 function navigate(space, thread, channel) {
   drafts.set(draftKey(), $("composer").value);
+  stopTyping();
   spaceId = space; threadId = thread;
   channelId = thread ? channelOf(data?.threads.find((t) => t.id === thread)) : channel ?? (space ? defaultChannel(space) : null);
   renderKey = ""; draftRequest = null;
@@ -299,6 +301,7 @@ function renderChat() {
   $("job-status").classList.toggle("hidden", !archived && !jobs.length && !needsPerson);
   $("job-status").textContent = archived ? "Канал в архиве: история доступна для чтения. Восстановите канал в его настройках, чтобы продолжить." : jobs.length ? jobs.map((j) => `${name(j.agent)} ${j.status === "queued" ? "ожидает свободного раннера" : "работает с контекстом треда"} · ${j.mode === "write" ? "изменения" : "разбор"}`).join(" · ") : needsPerson ? "Чтобы продолжить: напишите ответ или уточнение и укажите через @ агента, который должен подхватить разбор." : "";
   if (!archived && approval && !jobs.length) $('job-status').textContent = `${name(approval.agent)} ожидает разрешения владельца. Модель пока не запускается.`;
+  renderTyping();
   document.querySelector(".composer-hint").innerHTML = thread ? "@агент — продолжить разбор · без @ — добавить контекст · @сотрудник — уведомить <span>⌘ / Ctrl + Enter</span>" : "@сотрудник — уведомить · @агент — создать тред · без @ — обычный чат <span>⌘ / Ctrl + Enter</span>";
   for (const id of ["send", "composer", "mode", "mention-button", "new-thread", "stop", "resolve"]) $(id).disabled = archived || !space || !appState.connected;
   const sending = sendingIn();
@@ -394,6 +397,7 @@ function chooseMention(index) {
   if (option && mentionStart !== null && mentionEnd !== null && !input.disabled && mentionOptions().some((o) => o.kind === option.kind && o.id === option.id)) {
     input.setRangeText(`${option.insert} `, mentionStart, mentionEnd, 'end');
     drafts.set(draftKey(), input.value);
+    updateTyping();
   }
   hideMentions(); input.focus();
 }
@@ -416,7 +420,36 @@ function showMentions(forced = false) {
   });
 }
 function encodeMentions(text) { for (const option of mentionOptions()) text = text.split(option.insert).join(`@{${option.kind}:${option.id}}`); return text; }
-$("composer").addEventListener("input", () => showMentions());
+function nextTypingVersion() { typingVersion = Math.max(Date.now(), typingVersion + 1); return typingVersion; }
+function sameTypingContext(left, right) { return left && right && left.space === right.space && left.channel === right.channel && left.thread === right.thread; }
+function sendTyping(context, active) {
+  if (!context || !window.hub.typing) return;
+  void window.hub.typing({ ...context, active, version: nextTypingVersion() }).catch(() => {});
+}
+function stopTyping() {
+  clearTimeout(typingStopTimer); typingStopTimer = 0;
+  const context = typingContext, active = typingActive;
+  typingContext = null; typingActive = false; typingLastSent = 0;
+  if (active) sendTyping(context, false);
+}
+function updateTyping() {
+  const context = spaceId && channelId ? { space: spaceId, channel: channelId, thread: threadId } : null;
+  if (!$("composer").value.trim() || !appState?.connected || currentChannel()?.archived || !context) { stopTyping(); return; }
+  if (typingContext && !sameTypingContext(typingContext, context)) stopTyping();
+  typingContext = context;
+  const now = Date.now();
+  if (!typingActive || now - typingLastSent >= 2_000) { typingActive = true; typingLastSent = now; sendTyping(context, true); }
+  clearTimeout(typingStopTimer); typingStopTimer = setTimeout(stopTyping, 3_000);
+}
+function renderTyping() {
+  const active = (appState?.typing ?? []).filter((entry) => entry.employee !== data?.me.id && entry.active && entry.expiresAt > Date.now()
+    && entry.space === spaceId && entry.channel === channelId && entry.thread === threadId);
+  const people = [...new Set(active.map((entry) => name(entry.employee)))];
+  $("typing-status").classList.toggle("hidden", !people.length);
+  $("typing-status").textContent = people.length === 1 ? `${people[0]} печатает…` : people.length === 2 ? `${people[0]} и ${people[1]} печатают…` : people.length ? `${people.slice(0, 2).join(", ")} и ещё ${people.length - 2} печатают…` : "";
+}
+$("composer").addEventListener("input", () => { showMentions(); updateTyping(); });
+window.addEventListener("blur", stopTyping);
 $('composer').setAttribute('role', 'combobox');
 $('composer').setAttribute('aria-autocomplete', 'list'); $('composer').setAttribute('aria-controls', 'mention-picker'); $('composer').setAttribute('aria-expanded', 'false');
 $('mention-picker').setAttribute('role', 'listbox'); $('mention-picker').setAttribute('aria-label', 'Адресаты');
@@ -472,6 +505,7 @@ $("composer-form").onsubmit = (event) => {
   const content = encodeMentions($("composer").value.trim()); if (!content) return;
   if (!spaceId || !appState.connected || currentChannel()?.archived) { $("send-error").textContent = "Нет подключения к хабу или канал в архиве. Текст сохранён в поле ввода."; return; }
   const request = { space: spaceId, ...(channelSupport ? { channel: channelId } : {}), thread: threadId, content, mode: $("mode").value };
+  stopTyping();
   $("composer").value = ""; drafts.delete(draftKey()); $("send-error").textContent = ""; hideMentions();
   queuePost(request); $("composer").focus();
 };

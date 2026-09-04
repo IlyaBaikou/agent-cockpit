@@ -385,6 +385,22 @@ app.whenReady().then(async () => {
     })()`);
     console.log('PARTICIPATION_UI_SMOKE_OK');
     await window.webContents.executeJavaScript(`(async () => {
+      const check = (value, why) => { if (!value) throw new Error(why); };
+      navigate('demo-space', 'demo-thread', 'general:demo-space');
+      const input = document.getElementById('composer'), before = (await window.hub.testCalls()).length;
+      input.value = 'Печатаю ответ'; input.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 30));
+      const active = (await window.hub.testCalls()).slice(before).find(c => c.op === 'typing' && c.input.active);
+      check(active && active.input.thread === 'demo-thread', 'Typing start must carry exact context');
+      await window.hub.testSetTyping([{ type: 'typing', employee: 'peer', space: 'demo-space', channel: 'general:demo-space', thread: 'demo-thread', active: true, expiresAt: Date.now() + 5000, version: 1 }]);
+      check(document.getElementById('typing-status').innerText.includes('Sam печатает'), 'Peer typing status missing');
+      input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); await new Promise(r => setTimeout(r, 30));
+      check((await window.hub.testCalls()).slice(before).some(c => c.op === 'typing' && !c.input.active), 'Typing stop missing');
+      await window.hub.testSetTyping([]);
+      check(document.getElementById('typing-status').classList.contains('hidden'), 'Expired typing must disappear');
+    })()`);
+    console.log('REALTIME_TYPING_UI_SMOKE_OK');
+    await window.webContents.executeJavaScript(`(async () => {
       const saved = structuredClone(data), check = (v, why) => { if (!v) throw new Error(why); };
       let focused = false;
       Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => focused });

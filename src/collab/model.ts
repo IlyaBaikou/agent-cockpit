@@ -79,6 +79,10 @@ export type Snapshot = {
   participationVersion?: 1; participations?: Participation[];
   readVersion?: 1; readPositions?: ReadPosition[]; readBaseline?: number;
 };
+export type LiveEvent =
+  | { type: "ready" }
+  | { type: "change" }
+  | { type: "typing"; employee: string; space: string; channel: string; thread: string | null; active: boolean; expiresAt: number; version: number };
 export function emptyState(): State {
   return { version: 2, revision: 0, employees: [], agents: [], spaces: [], threads: [], messages: [], jobs: [], notices: [], sequence: 0, credentials: [], invitations: [], requests: [] };
 }

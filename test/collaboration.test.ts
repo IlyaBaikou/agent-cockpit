@@ -10,7 +10,7 @@ import { MemoryStateStore, PostgresStateStore, SqliteStateStore } from "../src/c
 import { collaborationHttp } from "../src/collab/http.js";
 import { CollaborationClient, hubUrl } from "../src/collab/client.js";
 import { pendingNotices } from "../src/collab/notifications.js";
-import type { Agent, Job, Snapshot, Space, Thread } from "../src/collab/model.js";
+import type { Agent, Job, LiveEvent, Snapshot, Space, Thread } from "../src/collab/model.js";
 import { decodeInvitation, encodeInvitation } from "../src/collab/invitations.js";
 import { compactionPlan, type ContextPacket } from "../src/collab/context.js";
 
@@ -431,14 +431,35 @@ describe("enrollment, persistence, HTTP and notifications", () => {
     expect((await service.call(alice, "sync") as Snapshot).spaces[0]?.name).toBe("PG Space"); await store.close();
   });
   let server: Server | undefined;
-  afterEach(async () => { if (server) await new Promise<void>((resolve) => server!.close(() => resolve())); server = undefined; });
+  afterEach(async () => { if (server) { server.closeAllConnections(); await new Promise<void>((resolve) => server!.close(() => resolve())); } server = undefined; });
   it("serves the authenticated v2 API and rejects malformed and cross-origin input", async () => {
     const h = setup(); server = createServer((req, res) => void collaborationHttp(h.service, req, res));
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
     const address = server.address(); if (!address || typeof address === "string") throw new Error("no port");
     const url = `http://127.0.0.1:${address.port}`, client = new CollaborationClient(url, alice);
+    const controller = new AbortController();
+    let readyResolve!: () => void, changeResolve!: () => void;
+    const ready = new Promise<void>((resolve) => { readyResolve = resolve; });
+    const changed = new Promise<void>((resolve) => { changeResolve = resolve; });
+    const stream = client.events(controller.signal, (event) => {
+      if (event.type === "ready") readyResolve();
+      if (event.type === "change") changeResolve();
+    }).catch((error) => { if (!controller.signal.aborted) throw error; });
+    await ready;
     expect((await client.call<Snapshot>("sync")).me.id).toBe("Alice");
-    const space = await client.call<Space>("space", { name: "HTTP Team" });
+    const space = await client.call<Space>("space", { name: "HTTP Team", members: ["Bob"] });
+    await changed;
+    const bobClient = new CollaborationClient(url, bob), bobController = new AbortController();
+    let bobReadyResolve!: () => void, typingResolve!: (event: Extract<LiveEvent, { type: "typing" }>) => void;
+    const bobReady = new Promise<void>((resolve) => { bobReadyResolve = resolve; });
+    const typed = new Promise<Extract<LiveEvent, { type: "typing" }>>((resolve) => { typingResolve = resolve; });
+    const bobStream = bobClient.events(bobController.signal, (event) => {
+      if (event.type === "ready") bobReadyResolve();
+      if (event.type === "typing") typingResolve(event);
+    }).catch((error) => { if (!bobController.signal.aborted) throw error; });
+    await bobReady;
+    await client.typing({ space: space.id, channel: `general:${space.id}`, thread: null, active: true, version: 1 });
+    expect(await typed).toMatchObject({ employee: "Alice", space: space.id, active: true, version: 1 });
     const invite = await client.call<{ code: string }>("group-invite", { space: space.id });
     const anonymous = new CollaborationClient(url, "");
     await expect(anonymous.enroll(invite.code)).rejects.toThrow("имя");
@@ -447,6 +468,9 @@ describe("enrollment, persistence, HTTP and notifications", () => {
     const bad = await fetch(`${url}/v2/rpc`, { method: "POST", body: "[" }); expect(bad.status).toBe(400);
     const cors = await fetch(`${url}/v2/rpc`, { method: "POST", headers: { Origin: "https://evil.test" }, body: "{}" }); expect(cors.status).toBe(403);
     await expect(new CollaborationClient(url, "bad").call("sync")).rejects.toThrow("Нет доступа");
+    const rejectedEvents = new CollaborationClient(url, "bad").events(AbortSignal.timeout(1_000), () => {});
+    await expect(rejectedEvents).rejects.toThrow("Нет доступа");
     expect(() => hubUrl("http://public.example")).toThrow("HTTPS"); expect(() => hubUrl("https://user:password@example.com")).toThrow();
+    controller.abort(); bobController.abort(); await Promise.all([stream, bobStream]);
   });
 });
