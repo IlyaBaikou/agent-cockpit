@@ -71,6 +71,7 @@ export class CursorAdapter implements AgentAdapter {
     ].join("\n");
     const args = [
       "--print",
+      "--trust",
       ...(writeMode ? ["--force"] : ["--mode=ask"]),
       "--output-format",
       "json",

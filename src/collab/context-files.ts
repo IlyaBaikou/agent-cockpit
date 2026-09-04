@@ -20,8 +20,7 @@ export async function contextFiles(packet: ContextPacket): Promise<{ path: strin
 
 // Avoid shell/Windows argument limits for every provider without depending on
 // provider-specific stdin flags. Tools load this exact UTF-8 file on demand.
-export async function promptArgument(prompt: string, platform = process.platform): Promise<{ prompt: string; cleanup: () => Promise<void> }> {
-  if (platform !== "win32" || prompt.length <= 16_000) return { prompt, cleanup: async () => {} };
+export async function promptArgument(prompt: string, _platform = process.platform): Promise<{ prompt: string; cleanup: () => Promise<void> }> {
   const path = await mkdtemp(join(tmpdir(), "agent-hub-prompt-"));
   const file = join(path, "request.txt");
   const cleanup = () => rm(path, { recursive: true, force: true });
