@@ -28,7 +28,7 @@ async function fixture() {
   const space = await client.call<Space>("space", { name: "Test" });
   const post = (mode = "read") => client.call<{ thread: Thread }>("post", { space: space.id, content: `@{a:${agent.id}} Test`, mode });
   const snapshot = () => client.call<Snapshot>("sync");
-  return { dir, client, agent, post, snapshot, store, space };
+  return { dir, client, agent, post, snapshot, store, space, service };
 }
 async function until(check: () => Promise<boolean>, timeout = 8000): Promise<void> {
   const start = Date.now();
@@ -49,6 +49,24 @@ it("retries delivery without executing the agent twice", async () => {
     expect(runs).toBe(1); expect((await f.snapshot()).messages.filter((m) => m.kind === "agent")).toHaveLength(1);
   } finally { runner.stop(); await rm(f.dir, { recursive: true, force: true }); }
 });
+
+it("does not run a model or summary for an incoming request until the owner approves", async () => {
+  const f = await fixture(); let runs = 0;
+  const invite = await f.client.call<{ code: string; employee: string }>("invite", { name: "Peer" });
+  const peer = await f.service.enroll(invite.code);
+  await f.client.call("members", { space: f.space.id, members: [peer.employee] });
+  const posted = await f.service.call(peer.token, "post", { space: f.space.id, content: `@{a:${f.agent.id}} Please review` }) as { thread: Thread };
+  const adapter: AgentAdapter = { id: "codex", healthCheck: async () => "ready", run: async () => { runs++; return { agent: "codex", content: "Answer\nROUTE: done" }; } };
+  const runner = new EmployeeRunner(f.client, f.agent, "test-device", join(f.dir, "worktrees"), { check: async () => "ready", adapter: () => adapter });
+  try {
+    runner.start(); await until(async () => (await f.snapshot()).agents[0]?.ready === true);
+    expect((await f.snapshot()).jobs).toHaveLength(0); expect(runs).toBe(0);
+    const snapshot = await f.snapshot(), p = snapshot.participations![0]!;
+    await f.client.call("participation", { id: p.id, revision: p.revision, threadRevision: posted.thread.revision, action: "allow", runs: 1 });
+    await until(async () => (await f.snapshot()).threads[0]?.status === "resolved");
+    expect(runs).toBe(1);
+  } finally { runner.stop(); await rm(f.dir, { recursive: true, force: true }); }
+}, 10_000);
 
 it("isolates v2 write jobs and delivers the diff without changing the original checkout", async () => {
   const f = await fixture(); let writtenPath = "";

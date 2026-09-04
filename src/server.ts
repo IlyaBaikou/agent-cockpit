@@ -30,6 +30,10 @@ const shutdown = (): void => {
   server.close(() => {
     void Promise.all([runtime.store.close(), collaborationStore.close()]).finally(() => process.exit(0));
   });
+  // SSE responses are intentionally long-lived and would otherwise keep a
+  // Railway rollout open until the hard shutdown timer. Give short RPCs a
+  // moment to finish, then make desktops reconnect to the new instance.
+  setTimeout(() => server.closeAllConnections(), 1_000).unref();
   setTimeout(() => process.exit(1), 10_000).unref();
 };
 process.once("SIGINT", shutdown);

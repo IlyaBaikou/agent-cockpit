@@ -36,12 +36,23 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Verify native CLI diagnostics on desktop OS
+        run: npx vitest run test/agent-diagnostics.test.ts test/diagnostic-delivery.test.ts test/process-diagnostics.test.ts
       - name: Verify context memory UI with synthetic data
         timeout-minutes: 2
         run: node node_modules/electron/cli.js scripts/smoke-context-ui.cjs
       - run: npm run desktop:dist -- --${{ matrix.platform }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify both Mac bundle signatures
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          for bundle in 'installers/mac-arm64/Agent Hub.app' 'installers/mac/Agent Hub.app'; do
+            codesign --verify --deep --strict --verbose=2 "$bundle"
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Info.plist")" = com.animaplay.agenthub
+            codesign -dv "$bundle" 2>&1 | grep -Fx 'Identifier=com.animaplay.agenthub'
+          done
       - name: Smoke test packaged application on Mac
         if: matrix.platform == 'mac'
         shell: bash

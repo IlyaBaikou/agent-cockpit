@@ -5,7 +5,14 @@ export type ProcessResult = {
   stdout: string;
   stderr: string;
   exitCode: number;
+  signal?: string;
 };
+
+// Retain output in memory until the adapter builds a bounded, redacted report.
+// Never log this object: arguments and environment must not enter diagnostics.
+export class ProcessError extends Error {
+  constructor(message: string, readonly code: string, readonly stdout = "", readonly stderr = "") { super(message); }
+}
 
 export async function runProcess(
   command: string,
@@ -13,7 +20,7 @@ export async function runProcess(
   options: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal } = {},
 ): Promise<ProcessResult> {
   return await new Promise((resolve, reject) => {
-    if (options.signal?.aborted) { reject(new Error("Agent stopped")); return; }
+    if (options.signal?.aborted) { reject(new ProcessError("Agent stopped", "ABORTED")); return; }
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env ?? buildAgentEnvironment(),
@@ -50,16 +57,16 @@ export async function runProcess(
     }, options.timeoutMs ?? 300_000);
     timer.unref();
 
-    child.on("error", (error) => { clearTimeout(timer); options.signal?.removeEventListener("abort", terminate); reject(error); });
-    child.on("close", (code) => {
+    child.on("error", (error: NodeJS.ErrnoException) => { clearTimeout(timer); options.signal?.removeEventListener("abort", terminate); reject(new ProcessError(error.message, error.code ?? "SPAWN_FAILED", stdout, stderr)); });
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", terminate);
-      if (options.signal?.aborted) { reject(new Error("Agent stopped")); return; }
+      if (options.signal?.aborted) { reject(new ProcessError("Agent stopped", "ABORTED", stdout, stderr)); return; }
       if (timedOut) {
-        reject(new Error(`${command} timed out after ${options.timeoutMs ?? 300_000}ms`));
+        reject(new ProcessError(`${command} timed out after ${options.timeoutMs ?? 300_000}ms`, "TIMEOUT", stdout, stderr));
         return;
       }
-      resolve({ stdout, stderr, exitCode: code ?? 1 });
+      resolve({ stdout, stderr, exitCode: code ?? 1, ...(signal ? { signal } : {}) });
     });
   });
 }

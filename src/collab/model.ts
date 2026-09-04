@@ -1,10 +1,13 @@
 import type { ContextStats, ThreadMemory } from "./context.js";
+import type { AgentDiagnostic } from "../agents/diagnostics.js";
 export type Executor = "codex" | "claude" | "cursor";
 export type Employee = { id: string; name: string };
 export type Agent = {
   id: string; owner: string; name: string; description: string; executor: Executor;
   device: string; enabled: boolean; allowWrite: boolean; fallback: string | null;
+  primary?: boolean;
   seenAt: number; ready: boolean; detail: string;
+  diagnostic?: AgentDiagnostic;
 };
 export type Space = { id: string; name: string; owner: string; members: string[]; createdAt: number };
 export type Channel = { id: string; space: string; name: string; description: string; owner: string; createdAt: number; archived: boolean; general: boolean };
@@ -22,7 +25,11 @@ export type Message = {
   id: string; space: string; thread: string | null; author: string;
   channel?: string;
   kind: "human" | "agent" | "system"; content: string; createdAt: number;
+  diagnosticJob?: string;
+  clientRequestId?: string;
+  seq?: number;
 };
+export type ReadPosition = { employee: string; channel: string; thread: string | null; through: number };
 export type Job = {
   id: string; thread: string; agent: string; requestedBy: string; mode: "read" | "write";
   status: "queued" | "running" | "done" | "error" | "cancelled";
@@ -30,10 +37,20 @@ export type Job = {
   remaining: number; visited: string[]; started: boolean;
   contextThrough?: string;
   contextStats?: ContextStats;
+  diagnostic?: AgentDiagnostic;
+  // Only a direct owner post or a coordinator-issued participation grant may queue work.
+  authorization?: { kind: "owner" } | { kind: "participation"; participation: string };
+};
+export type Participation = {
+  id: string; thread: string; agent: string;
+  status: "pending" | "allowed" | "denied" | "revoked";
+  remaining: number; used: number; revision: number;
+  request?: { id: string; requestedBy: string; sourceMessage: string; chainRemaining: number; visited: string[]; createdAt: number };
 };
 export type Notice = {
   seq: number; employee: string; title: string; body: string; space: string; thread: string | null;
   channel?: string; silent?: boolean; event?: string;
+  read?: boolean;
 };
 export type GroupInvitation = {
   id: string; owner: string; space: string; hash: string; createdAt: number;
@@ -49,6 +66,9 @@ export type State = {
   channelsVersion?: 1; channels?: Channel[];
   channelPreferences?: ChannelPreference[]; threadSubscriptions?: ThreadSubscription[];
   requests: { actor: string; key: string; result: unknown }[];
+  participationVersion?: 1; participations?: Participation[];
+  readVersion?: 1; messageSequence?: number; readPositions?: ReadPosition[];
+  readBaselines?: { employee: string; through: number }[];
 };
 export type Snapshot = {
   me: Employee; revision: number; employees: Employee[]; agents: Agent[]; spaces: Space[];
@@ -56,7 +76,13 @@ export type Snapshot = {
   groupInvitations?: GroupInvitationInfo[];
   channels?: Channel[];
   channelPreferences?: ChannelPreference[]; threadSubscriptions?: ThreadSubscription[];
+  participationVersion?: 1; participations?: Participation[];
+  readVersion?: 1; readPositions?: ReadPosition[]; readBaseline?: number;
 };
+export type LiveEvent =
+  | { type: "ready" }
+  | { type: "change" }
+  | { type: "typing"; employee: string; space: string; channel: string; thread: string | null; active: boolean; expiresAt: number; version: number };
 export function emptyState(): State {
   return { version: 2, revision: 0, employees: [], agents: [], spaces: [], threads: [], messages: [], jobs: [], notices: [], sequence: 0, credentials: [], invitations: [], requests: [] };
 }
@@ -70,6 +96,4 @@ export function field(value: unknown, label: string, max = 200): string {
   requireValue(typeof value === "string" && value.trim().length > 0 && value.length <= max, `${label}: требуется текст (до ${max} символов)`);
   return value.trim();
 }
-export function mentions(content: string): { kind: "a" | "u"; id: string }[] {
-  return [...content.matchAll(/@\{([au]):([a-zA-Z0-9._-]+)\}/g)].map((m) => ({ kind: m[1] as "a" | "u", id: m[2]! }));
-}
+export { mentions } from "./addressing.js";

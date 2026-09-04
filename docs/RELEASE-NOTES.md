@@ -1,4 +1,70 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.5.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.13.
+
+New in 0.2.13:
+
+- Desktop clients keep an authenticated SSE connection to the coordinator. Successful mutations trigger an immediate access-filtered sync instead of waiting for the previous three-second polling cycle, and wake local runners so newly queued agent work does not wait for their five-second fallback poll. A 30-second UI sync remains as recovery and SSE reconnects with bounded backoff.
+- Human typing presence is shown only in the exact space/channel/thread. Presence expires after five seconds, is never persisted, never enters model context and does not invoke an agent. Existing job status remains the indicator for agent work.
+- Message submission still uses acknowledged HTTPS POST and the existing idempotent outbox. SSE carries only invalidation and ephemeral presence, not message bodies. Remote clients need no inbound port or VPN.
+- The pilot coordinator must remain single-replica because its SSE subscriber list and presence are process-local. Add a shared event bus (for example PostgreSQL LISTEN/NOTIFY plus a presence transport) before horizontal scaling. Update coordinator first, then desktops; no PostgreSQL migration or credential change is required.
+
+New in 0.2.12:
+
+- Every employee now has one default agent. The first configured agent is the backward-compatible default; the owner can promote another agent from its settings. The owner sidebar and own-agent mention suggestions put that default first and label it.
+- Coworkers still see two distinct address types: the employee mention only sends a notification, while the separate agent mention invokes the employee's default agent. They no longer choose among that employee's local executors or auxiliary agents.
+- Agent-to-agent directories expose one default peer agent per employee. Configured fallback remains an internal execution path when the default executor is unavailable; consent, write restrictions and the existing fallback grant remain unchanged.
+- Deploy the coordinator before updating desktops so the selected default is shared across devices. Existing records need no destructive migration: until an owner selects another default, their first legacy agent is used deterministically.
+
+New in 0.2.11:
+
+- Hotfix for a Mac first-launch race: an activation event can no longer reveal the initial empty window before the sandboxed renderer has loaded. The app shows and focuses the window only after its real document is ready. No coordinator, data or routing migration is needed.
+
+New in 0.2.10:
+
+- The recipient picker no longer offers your own employee profile: mentioning yourself cannot notify anyone useful. Existing self mentions in history remain readable but cannot be inserted by clicking.
+- Recipients are grouped as other employees, their enabled agents, then your enabled agents. Filtering preserves this priority and stable order; colleagues with the same display name remain distinct by ID. Own agents remain available in solo spaces.
+- This is a desktop-only UI update compatible with coordinator 0.2.8/0.2.9. It changes neither space membership nor routing permissions, and needs no server deployment or data migration.
+
+New in 0.2.9:
+
+- Mac bundles now receive a complete ad-hoc signature under `com.animaplay.agenthub`, including the nested helpers and sealed resources. Earlier builds skipped signing and could retain an invalid Electron signature, preventing native notification registration. No developer certificate/private key is used. This is **not Developer ID signing or Apple notarization**: it fixes bundle integrity, not trusted public distribution. Corporate Gatekeeper policies may still block installation.
+- Install the app from its DMG into Applications and launch that copy. Run Settings → System notifications → Send test notification and respond to macOS's permission request yourself. On the pilot Mac, registration in System Settings → Notifications and OS acceptance were verified without a Developer ID certificate. Other machines/OS versions still need a pilot check; a visible banner also depends on Focus and notification settings.
+- The test waits for the native response and shows rejection details or an explicit unconfirmed timeout. It no longer claims success just because the send function returned. Duplicate clicks are blocked while waiting.
+- Windows uses the same notification test. Install using the EXE installer, launch Agent Hub from the Start Menu, and run the test with notifications enabled in Windows. Automated build/UI checks do not prove that a real Windows desktop displays the banner; that still needs confirmation on a pilot participant's PC.
+- The main window loads its real document before it is shown or native menus are initialized, avoiding the visible blank startup page observed during signed-install testing. Renderer sandboxing remains enabled.
+- Mac CI verifies both architecture bundle signatures; packaged smoke tests now load the renderer in an isolated temporary profile, without connecting accounts or invoking agents. This desktop-only update is compatible with coordinator 0.2.8; no server deployment or data migration is needed.
+
+New in 0.2.8:
+
+- Agent answers visibly tag their recipient: the requesting human for a final answer, the selected human for a decision, or the next agent for a handoff. Prompts include exact mention tokens; the coordinator adds missing recipient tags from legacy routing directives.
+- A single agent mention in a reply can now hand off without a separate ROUTE line, in the same thread with the existing context, approval gate and 12-answer cap. Repeated delivery/mentions do not create duplicate jobs. Human mentions notify people, never invoke their agents.
+- Conflicting routes, multiple peers, self-calls and unavailable recipients stop with a visible error. Code examples, quotes and URLs do not invoke agents, including in human messages. Plain display names are not guessed.
+- Reply, mention, follower and completion notifications are deduplicated per message and employee; decision requests keep a distinct actionable title. Existing mute/read/OS preferences still apply.
+- Click a mention to add that person or agent to your reply draft; clicking never sends a message or starts a model. Old history is neither rewritten nor replayed.
+- The recipient picker supports Up/Down (with highlighted selection), Enter to insert and close, Escape/Tab/outside click to dismiss. Enter while the picker is open never sends the message, including Ctrl/Cmd+Enter. IME composition is respected.
+- While a message awaits confirmation, the send button reads “Sending…” and blocks button/form/hotkey re-entry in that conversation. You can still type the next draft or use another conversation. Success/failure unlocks sending; retry uses the same lock and immutable request ID.
+- Deploy the coordinator for new routing/notifications; update desktops for clickable mention chips. No new storage migration or credential setup is needed.
+
+New in 0.2.7:
+
+- Owners approve incoming requests: one task, or discussion with three tasks. No model/summary call while waiting. Automatic handoffs (including returns to the initiating employee's agent and fallbacks) need per-agent/per-thread permission. Repeated mentions cannot refill it. Explicit owner requests remain one-off.
+- Grants are reserved atomically when queueing; errors, cancellations and queue timeouts are not refunded. A task may include a summary call: this controls attempts, not exact tokens. The 12-answer chain cap remains independent.
+- Decisions are owner-only and check request/thread revisions. Stop, completion, archive, agent settings changes and membership removal revoke affected grants. Write fallback requires a new explicit owner write request.
+- Persistent unread badges on spaces, channels, thread lists and thread cards. Reading a channel does not read its threads. Background windows and readers of older history preserve new badges. Threads open directly at the end without animated scrolling; incoming updates preserve history-reading positions.
+- Inbox counts unread notices only, with read history, “Mark all read” and “Clear read”. Viewing a conversation reads its observed notices. Clearing does not remove messages, resolve approvals, affect other employees, or replay OS banners. Already displayed OS notification-center entries are not removed.
+- Russian `ARCHITECTURE.md` for contributors and explicit `--profile-dir` isolation for development.
+- Update coordinator **before** desktops. New desktops stop runners on servers without consent support. Old desktops cannot bypass the new server gate but lack approval controls. Migration preserves history/settings/credentials, cancels old queued jobs, and lets running jobs finish with subsequent handoffs gated. Old history becomes a read baseline; the existing inbox remains available for clearing. Do not roll back to an old server while agents are enabled: old code does not enforce grants.
+
+New in 0.2.6:
+
+- Messages appear immediately with “Sending…”, then a coordinator acknowledgement. New drafts stay intact. Unconfirmed messages remain in their original chat with a retry button while the app is open; the outbox is not persisted across quitting the app.
+- Retries reuse the original request ID. Durable receipts in message history prevent duplicate messages, threads and agent launches even after the short RPC response cache expires. An acknowledgement is not a read receipt.
+- Human-readable CLI failures distinguish missing executables/folders, authentication, unsupported arguments, trust prompts, network errors, quotas, timeouts, empty output and unsupported response formats. Unknown failures are explicitly labelled unknown rather than blamed on authentication.
+- “Error details” shows stage, platform, app/CLI versions, exit/system codes and bounded redacted stdout/stderr. The connection check also displays details and clears its progress indicator on failure.
+- Detailed job reports are stored on the coordinator, visible only to the agent owner or a configured bootstrap control operator who also has access to the thread's space. Other participants see only a short safe explanation. Space ownership alone does not grant access to someone else's diagnostics.
+- Reports retain at most 4,000 characters per output stream (plus a truncation marker), up to 200 job reports for 14 days. Expired details are hidden and pruned during report/heartbeat writes; original chat history is preserved. Prompts, command arguments and environment snapshots are not collected. Known secrets and home-directory names are redacted, but arbitrary CLI output can still contain private data: inspect before sharing.
+- Claude discovery supports versioned Windows Desktop installations under AppData/Roaming and native .local/bin installations. Explicit binary overrides remain authoritative. Empty/malformed Claude auth status no longer incorrectly counts as a successful login.
+- Claude/Cursor parsing handles final-result objects, arrays and newline-delimited JSON without treating partial tool events as completed answers. Failure diagnostics preserve plain stdout, stderr even on exit 0, and structured provider errors. Cursor write mode no longer passes unsupported --mode=agent (agent mode is the default).
+- Update **both the coordinator and desktop apps** for server-side reports. Existing PostgreSQL/SQLite history, credentials and agent settings remain in place. Previously discarded error output cannot be recovered; repeat the failed request after updating. This release improves diagnostics and known compatibility issues, but does not claim to resolve every provider-side failure.
 
 New in 0.2.5:
 
@@ -46,6 +112,6 @@ New in 0.2.1:
 
 Install the DMG matching your Mac (arm64 = Apple Silicon, x64 = Intel), or the Windows x64 EXE. The source repository is not needed to run the installed app. Install and sign in to your preferred CLI separately, then choose its working directory in Agent Hub.
 
-These are unsigned pilot builds, not notarized/enterprise-signed production installers. OS security warnings may apply. Do not disable corporate security policies; use your approved internal distribution process. SHA256SUMS.txt verifies the downloaded files, not the identity of a trusted publisher.
+These are pilot builds: Mac uses an ad-hoc bundle signature, Windows is unsigned. They are not notarized/enterprise-signed production installers. OS security warnings may apply. Do not disable corporate security policies; use your approved internal distribution process. SHA256SUMS.txt verifies the downloaded files, not the identity of a trusted publisher.
 
 Jira, Confluence and PR URLs can be shared in chat. Reading them depends on the selected CLI's own configured connectors/permissions; this release does not share another app's OAuth session. There is no automatic update, SSO or centralized employee deprovisioning yet. Invite only trusted pilot participants and use non-sensitive test workspaces initially. Cursor/Claude tool policies are not an OS-level isolation guarantee.

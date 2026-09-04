@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { realpath, stat } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
+import { AgentExecutionError, agentFailure, checkWorkspace, type AgentDiagnostic } from "../agents/diagnostics.js";
 import { CodexAdapter } from "../agents/codex.js";
 import { ClaudeAdapter } from "../agents/claude.js";
 import { CursorAdapter } from "../agents/cursor.js";
@@ -13,51 +14,59 @@ import { contextFiles, promptArgument } from "./context-files.js";
 export type LocalAgent = {
   id: string; name: string; description: string; executor: Executor; directory: string;
   binary: string; enabled: boolean; allowWrite: boolean; fallback: string | null;
+  primary?: boolean;
 };
 export function adapterFor(agent: Pick<LocalAgent, "executor" | "binary">): AgentAdapter {
   const options = agent.binary ? { binary: agent.binary } : {};
   return agent.executor === "codex" ? new CodexAdapter(options) : agent.executor === "claude" ? new ClaudeAdapter(options) : new CursorAdapter(options);
 }
 export async function checkLocalAgent(agent: LocalAgent): Promise<string> {
-  if (!(await stat(agent.directory)).isDirectory()) throw new Error("Рабочая папка не найдена");
+  await checkWorkspace(agent.executor, agent.directory);
   return adapterFor(agent).healthCheck();
 }
 
 export class EmployeeRunner extends EventEmitter {
   #timer: NodeJS.Timeout | undefined;
   #busy = false;
+  #wakePending = false;
   #stopped = false;
   #abort: AbortController | undefined;
   #lastHealth = 0;
   #lastHeartbeat = 0;
   #ready = false;
   #detail = "Проверка…";
+  #diagnostic: AgentDiagnostic | undefined;
   constructor(private client: CollaborationClient, readonly agent: LocalAgent, private device: string, private worktreesRoot: string,
-    private dependencies = { check: checkLocalAgent, adapter: adapterFor }) { super(); }
+    private dependencies = { check: checkLocalAgent, adapter: adapterFor }, private appVersion = "не определена") { super(); }
   start(): void { void this.tick(); this.#timer = setInterval(() => void this.tick(), 5000); }
-  stop(): void { this.#stopped = true; clearInterval(this.#timer); this.#abort?.abort(); }
+  wake(): void { if (this.#busy) this.#wakePending = true; else void this.tick(); }
+  stop(): void { this.#stopped = true; this.#wakePending = false; clearInterval(this.#timer); this.#abort?.abort(); }
   private async tick(): Promise<void> {
     if (this.#busy || this.#stopped || !this.agent.enabled) return;
     this.#busy = true;
     try {
       if (Date.now() - this.#lastHealth > 60_000) {
-        try { this.#detail = await this.dependencies.check(this.agent); this.#ready = true; }
-        catch (error) { this.#detail = error instanceof Error ? error.message : String(error); this.#ready = false; }
+        try { this.#detail = await this.dependencies.check(this.agent); this.#ready = true; this.#diagnostic = undefined; }
+        catch (error) { const failure = this.failure(error); this.#detail = failure.message; this.#diagnostic = failure.diagnostic; this.#ready = false; }
         this.#lastHealth = Date.now();
       }
       if (this.#stopped) return;
       if (Date.now() - this.#lastHeartbeat > 15_000) {
-        await this.client.call("heartbeat", { agent: this.agent.id, device: this.device, ready: this.#ready, detail: this.#detail });
+        await this.client.call("heartbeat", { agent: this.agent.id, device: this.device, ready: this.#ready, detail: this.#detail, ...(this.#diagnostic ? { diagnostic: this.#diagnostic } : {}) });
         this.#lastHeartbeat = Date.now();
       }
-      this.emit("health", { id: this.agent.id, ready: this.#ready, detail: this.#detail });
+      this.emit("health", { id: this.agent.id, ready: this.#ready, detail: this.#detail, diagnostic: this.#diagnostic });
       // Claim unavailable jobs too after a failed health check: the server will route
       // on its queue timeout, without ever starting this executor.
       if (!this.#ready) return;
-      const result = await this.client.call<{ job: Job | null; prompt?: string; agent?: Agent; context?: ContextPacket }>("claim", { agent: this.agent.id, device: this.device, contextVersion: 1 });
+      const result = await this.client.call<{ job: Job | null; prompt?: string; agent?: Agent; context?: ContextPacket; participationVersion?: number }>("claim", { agent: this.agent.id, device: this.device, contextVersion: 1 });
+      if (result.job && (result.participationVersion !== 1 || !result.job.authorization)) throw new Error("Координатор не подтвердил разрешение на запуск. Обновите хаб до 0.2.7.");
       if (result.job && result.prompt) await this.execute(result.job, result.prompt, result.context);
     } catch (error) { this.emit("health", { id: this.agent.id, ready: false, detail: error instanceof Error ? error.message : String(error) }); }
-    finally { this.#busy = false; }
+    finally {
+      this.#busy = false;
+      if (this.#wakePending && !this.#stopped) { this.#wakePending = false; queueMicrotask(() => void this.tick()); }
+    }
   }
   private async execute(job: Job, prompt: string, packet?: ContextPacket): Promise<void> {
     this.#abort = new AbortController();
@@ -129,13 +138,18 @@ export class EmployeeRunner extends EventEmitter {
       // Retrying result delivery is safe (the execution itself is never repeated).
       await this.deliver("complete", { ...leaseBody, content, ...(memory ? { memory } : {}), ...(contextStats ? { contextStats } : {}) }, 3);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.emit("health", { id: this.agent.id, ready: false, detail: message });
-      await this.deliver("fail", { ...leaseBody, error: message }, 2).catch(() => undefined);
+      const failure = this.failure(error);
+      this.emit("health", { id: this.agent.id, ready: false, detail: failure.message, diagnostic: failure.diagnostic });
+      await this.deliver("fail", { ...leaseBody, error: failure.message, diagnostic: failure.diagnostic }, 2).catch(() => undefined);
     } finally {
       clearInterval(renew); this.#abort = undefined;
       for (const dispose of cleanup.reverse()) await dispose().catch(() => undefined);
     }
+  }
+  private failure(error: unknown): AgentExecutionError {
+    const failure = error instanceof AgentExecutionError ? error : agentFailure({ provider: this.agent.executor, stage: "run", error });
+    failure.diagnostic.appVersion = this.appVersion;
+    return failure;
   }
   private async deliver(op: string, body: Record<string, unknown>, attempts: number): Promise<void> {
     for (let attempt = 0; attempt < attempts; attempt++) {

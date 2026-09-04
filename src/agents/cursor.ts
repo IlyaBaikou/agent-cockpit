@@ -3,18 +3,11 @@ import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { ClaudeAdapter } from "./claude.js";
-import { runProcess } from "../process.js";
+import { agentFailure, runAgentProcess, checkWorkspace } from "./diagnostics.js";
+import { parseCliOutput } from "./cli-output.js";
 import type { AgentAdapter, AgentRequest, AgentResult } from "./adapter.js";
 
 export type ClaudeExecutor = "auto" | "claude" | "cursor";
-
-type CursorJsonResult = {
-  type?: string;
-  subtype?: string;
-  is_error?: boolean;
-  result?: string;
-  session_id?: string;
-};
 
 async function executable(path: string): Promise<boolean> {
   try {
@@ -52,17 +45,19 @@ export class CursorAdapter implements AgentAdapter {
 
   async healthCheck(): Promise<string> {
     const binary = await resolveCursorBinary(this.#explicitBinary);
-    const version = await runProcess(binary, ["--version"], { timeoutMs: 10_000 });
-    if (version.exitCode !== 0) throw new Error(version.stderr.trim() || "Cursor CLI health check failed");
-    const status = await runProcess(binary, ["status"], { timeoutMs: 15_000 });
+    const version = await runAgentProcess("cursor", "version", binary, ["--version"], { timeoutMs: 10_000 });
+    if (version.exitCode !== 0 || !version.stdout.trim()) throw agentFailure({ provider: "cursor", stage: "version", binary, result: version });
+    const status = await runAgentProcess("cursor", "auth", binary, ["status"], { timeoutMs: 15_000 });
     if (status.exitCode !== 0 || /not authenticated|not logged in/i.test(`${status.stdout}\n${status.stderr}`)) {
-      throw new Error("Cursor CLI is installed but not authenticated; run `cursor-agent login`");
+      throw agentFailure({ provider: "cursor", stage: "auth", binary, result: status, code: "auth" });
     }
+    if (!status.stdout.trim() && !status.stderr.trim()) throw agentFailure({ provider: "cursor", stage: "auth", binary, result: status, code: "empty_response" });
     return `Cursor CLI ${version.stdout.trim()} (authenticated)`;
   }
 
   async run(request: AgentRequest): Promise<AgentResult> {
     const binary = await resolveCursorBinary(this.#explicitBinary);
+    await checkWorkspace("cursor", request.repositoryPath);
     const writeMode = request.mode === "write";
     const prompt = request.protocol === "collaboration" ? request.prompt : [
       writeMode
@@ -82,18 +77,13 @@ export class CursorAdapter implements AgentAdapter {
       "json",
       prompt,
     ];
-    const result = await runProcess(binary, args, { cwd: request.repositoryPath, timeoutMs: this.#timeoutMs, ...(request.signal ? { signal: request.signal } : {}) });
-    let parsed: CursorJsonResult | undefined;
-    try {
-      parsed = JSON.parse(result.stdout) as CursorJsonResult;
-    } catch {
-      // Older Cursor builds may return plain text despite the requested format.
+    const result = await runAgentProcess("cursor", "run", binary, args, { cwd: request.repositoryPath, timeoutMs: this.#timeoutMs, ...(request.signal ? { signal: request.signal } : {}) }, [prompt, request.prompt]);
+    const parsed = parseCliOutput(result.stdout);
+    if (result.exitCode !== 0 || parsed.failed || !parsed.content) {
+      throw agentFailure({ provider: "cursor", stage: "response", binary, result, detail: parsed.error,
+        code: result.exitCode !== 0 || parsed.failed ? "cli_failed" : !parsed.complete ? "invalid_response" : "empty_response", sensitive: [prompt, request.prompt] });
     }
-    const content = parsed?.result?.trim() || result.stdout.trim();
-    if (result.exitCode !== 0 || parsed?.is_error || !content) {
-      throw new Error(parsed?.result?.trim() || result.stderr.trim() || result.stdout.trim() || `Cursor CLI exited with code ${result.exitCode}`);
-    }
-    return { agent: this.id, content, ...(parsed?.session_id ? { sessionId: parsed.session_id } : {}) };
+    return { agent: this.id, content: parsed.content, ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}) };
   }
 }
 

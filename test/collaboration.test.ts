@@ -10,7 +10,7 @@ import { MemoryStateStore, PostgresStateStore, SqliteStateStore } from "../src/c
 import { collaborationHttp } from "../src/collab/http.js";
 import { CollaborationClient, hubUrl } from "../src/collab/client.js";
 import { pendingNotices } from "../src/collab/notifications.js";
-import type { Agent, Job, Snapshot, Space, Thread } from "../src/collab/model.js";
+import type { Agent, Job, LiveEvent, Snapshot, Space, Thread } from "../src/collab/model.js";
 import { decodeInvitation, encodeInvitation } from "../src/collab/invitations.js";
 import { compactionPlan, type ContextPacket } from "../src/collab/context.js";
 
@@ -28,10 +28,76 @@ function setup() {
   const post = (space: Space, target?: Agent, extra = {}): Promise<{ thread: Thread; message: unknown }> => call("post", { space: space.id, content: target ? `Please review @{a:${target.id}}` : "Hello people", ...extra });
   const claim = (a: Agent, token = alice): Promise<{ job: Job; prompt: string }> => call("claim", { agent: a.id, device: a.device }, token);
   const complete = (a: Agent, job: Job, content = "Answer\nROUTE: done", token = alice): Promise<unknown> => call("complete", { job: job.id, lease: job.lease, device: a.device, content }, token);
-  return { store, service, call, agent, space, post, claim, complete, advance: (ms: number) => { now += ms; } };
+  const approve = async (a: Agent, token = alice) => {
+    const s = await call<Snapshot>("sync", { channelVersion: 1 }, token), p = s.participations?.find((p) => p.agent === a.id && p.status === "pending");
+    if (p) await call("participation", { id: p.id, revision: p.revision, threadRevision: s.threads.find((t) => t.id === p.thread)!.revision, action: "allow", runs: 3 }, token);
+  };
+  return { store, service, call, agent, space, post, claim, complete, approve, advance: (ms: number) => { now += ms; } };
 }
 
 describe("employee-owned agents and shared spaces", () => {
+  it("tags and notifies human recipients once, even if they also follow the thread", async () => {
+    const h = setup(), a = await h.agent("A"), space = await h.space();
+    const { thread } = await h.post(space, a); const first = await h.claim(a);
+    expect(first.prompt).toContain("mention @{u:Bob}"); expect(first.prompt).toContain(`Your agent ID is ${a.id}`);
+    await h.call("thread-subscription", { thread: thread.id, following: true }, bob);
+    const before = (await h.call<Snapshot>("sync", {}, bob)).sequence;
+    await h.complete(a, first.job, "Approve?\nROUTE: human:Bob");
+    await h.complete(a, first.job, "Approve?\nROUTE: human:Bob");
+    const s = await h.call<Snapshot>("sync", {}, bob), reply = s.messages.find((m) => m.kind === "agent")!;
+    expect(reply.content).toBe("@{u:Bob}\n\nApprove?");
+    expect(s.notices.filter((n) => n.seq > before)).toEqual([expect.objectContaining({ employee: "Bob", event: reply.id, title: "Нужно ваше решение" })]);
+    await h.post(space, a, { thread: thread.id }); const next = await h.claim(a);
+    const previous = (await h.call<Snapshot>("sync")).sequence;
+    await h.complete(a, next.job);
+    const final = await h.call<Snapshot>("sync");
+    expect(final.messages.filter((m) => m.kind === "agent").at(-1)?.content).toBe("@{u:Alice}\n\nAnswer");
+    expect(final.notices.filter((n) => n.seq > previous)).toHaveLength(1);
+  });
+  it("runs a mention-only peer handoff once after consent, in the same thread, with shared context", async () => {
+    const h = setup(), a = await h.agent("A"), b = await h.agent("B", bob), space = await h.space();
+    const { thread } = await h.post(space, a); const first = await h.claim(a);
+    await h.complete(a, first.job, `@{a:${b.id}} Review the contract?`);
+    await h.complete(a, first.job, `@{a:${b.id}} Review the contract?`);
+    expect((await h.claim(b, bob)).job).toBeNull();
+    const waiting = await h.call<Snapshot>("sync", {}, bob);
+    expect(waiting.jobs).toHaveLength(1); expect(waiting.participations).toHaveLength(1);
+    expect(waiting.notices.filter((n) => n.title === "Разрешить участие агента?")).toHaveLength(1);
+    await h.approve(b, bob); const second = await h.claim(b, bob);
+    expect(second.job.thread).toBe(thread.id); expect(second.job.mode).toBe("read");
+    expect(second.prompt).toContain("Review the contract?");
+    await h.complete(b, second.job, `@{a:${a.id}} Please clarify the field.`, bob);
+    expect((await h.claim(a)).job).toBeNull(); await h.approve(a);
+    const third = await h.claim(a); expect(third.prompt).toContain("Please clarify the field.");
+    await h.complete(a, third.job, "Clarified\nROUTE: done");
+    expect((await h.call<Snapshot>("sync")).jobs).toHaveLength(3);
+  });
+  it("does not launch a mention-only peer after human intervention or conflicting recipients", async () => {
+    const h = setup(), a = await h.agent("A"), b = await h.agent("B"), space = await h.space();
+    const { thread } = await h.post(space, a); const { job } = await h.claim(a);
+    await h.post(space, undefined, { thread: thread.id, content: "Wait, changed requirements" });
+    await h.complete(a, job, `@{a:${b.id}} Review?`);
+    expect((await h.call<Snapshot>("sync")).participations).toHaveLength(0);
+    await h.post(space, a, { thread: thread.id }); const next = await h.claim(a);
+    await h.complete(a, next.job, `@{a:${b.id}} Review?\nROUTE: done`);
+    const s = await h.call<Snapshot>("sync");
+    expect(s.threads[0]?.status).toBe("error"); expect(s.jobs).toHaveLength(2);
+    expect(s.messages.at(-1)?.content).toContain("противоречат");
+  });
+  it("applies the chain cap to mention-only ping-pong and never calls models for quoted human posts", async () => {
+    const h = setup(), a = await h.agent("A"), b = await h.agent("B"), space = await h.space();
+    await h.post(space, undefined, { content: `Example: \`@{a:${a.id}}\`\n\n> @{a:${b.id}}` });
+    expect((await h.call<Snapshot>("sync")).jobs).toHaveLength(0);
+    await h.post(space, a);
+    for (let i = 0; i < 12; i++) {
+      const active = i % 2 ? b : a, next = i % 2 ? a : b;
+      await h.approve(active); const { job } = await h.claim(active);
+      await h.complete(active, job, `@{a:${next.id}} Question ${i}`);
+    }
+    const s = await h.call<Snapshot>("sync");
+    expect(s.jobs).toHaveLength(12); expect(s.threads[0]?.status).toBe("waiting");
+    expect(s.messages.at(-1)?.content).toContain("лимит 12");
+  });
   it("does not invoke models for ordinary chat or human mentions", async () => {
     const h = setup(), space = await h.space(); await h.agent("Reviewer");
     await h.post(space); await h.call("post", { space: space.id, content: "Question for @{u:Bob}" });
@@ -43,11 +109,27 @@ describe("employee-owned agents and shared spaces", () => {
     const posted = await h.post(space, a); const first = await h.claim(a);
     expect((await h.claim(b, bob)).job).toBeNull();
     await h.complete(a, first.job, `Question for frontend\nROUTE: agent:${b.id}`);
+    expect((await h.claim(b, bob)).job).toBeNull(); await h.approve(b, bob);
     const second = await h.claim(b, bob); expect(second.job.thread).toBe(posted.thread.id);
     expect(second.prompt).toContain("Question for frontend"); expect(second.prompt).toContain("Please review");
     await h.complete(b, second.job, "Agreed\nROUTE: done", bob);
     const s = await h.call<Snapshot>("sync"); expect(s.threads[0]?.status).toBe("resolved");
     expect(s.messages.filter((m) => m.kind === "agent").map((m) => m.author)).toEqual([a.id, b.id]);
+  });
+  it("keeps one owner-selected default agent and offers only peer defaults to agents", async () => {
+    const h = setup(), first = await h.agent("First"), second = await h.agent("Second"), peerDefault = await h.agent("Peer default", bob), peerAux = await h.agent("Peer aux", bob);
+    expect(first.primary).toBe(true); expect(second.primary).toBe(false);
+    const promoted = await h.call<Agent>("agent", { ...second, primary: true });
+    expect(promoted.primary).toBe(true);
+    await h.call("heartbeat", { agent: second.id, device: second.device, ready: true });
+    const own = await h.call<Snapshot>("sync");
+    expect(own.agents.find((a) => a.id === first.id)?.primary).toBe(false);
+    expect(own.agents.find((a) => a.id === second.id)?.primary).toBe(true);
+    const space = await h.space();
+    const next = await h.post(space, second); const claimed = await h.claim(second);
+    expect(claimed.prompt).toContain(`Peer default [${peerDefault.id}]`);
+    expect(claimed.prompt).not.toContain(`Peer aux [${peerAux.id}]`);
+    expect(next.thread.id).toBeTruthy();
   });
   it("keeps private spaces private and disallows outsiders in mentions", async () => {
     const h = setup(), space = await h.space([]), b = await h.agent("Foreign", bob);
@@ -86,9 +168,11 @@ describe("employee-owned agents and shared spaces", () => {
     await h.complete(a, first.job, "Approve contract?\nROUTE: human:Bob");
     const waiting = await h.call<Snapshot>("sync", {}, bob); expect(waiting.threads[0]?.status).toBe("waiting"); expect(waiting.notices.at(-1)?.title).toBe("Нужно ваше решение");
     await h.call("post", { space: space.id, thread: thread.id, content: `Approved discussion direction, but no code edits. @{a:${a.id}} Continue with the peer.` }, bob);
+    await h.approve(a);
     const next = await h.claim(a); expect(next.prompt).toContain("Approved"); expect(next.prompt).toContain("Approve contract?");
     expect(next.job.mode).toBe("read"); expect(next.job.thread).toBe(thread.id);
     await h.complete(a, next.job, `Please review the clarified contract\nROUTE: agent:${peer.id}`);
+    await h.approve(peer, bob);
     const handoff = await h.claim(peer, bob);
     expect(handoff.job.thread).toBe(thread.id); expect(handoff.job.mode).toBe("read");
     expect(handoff.prompt).toContain("no code edits"); expect(handoff.prompt).toContain("clarified contract");
@@ -105,7 +189,7 @@ describe("employee-owned agents and shared spaces", () => {
   });
   it("limits a ping-pong chain to 12 answers", async () => {
     const h = setup(), a = await h.agent("A"), b = await h.agent("B"), space = await h.space(); await h.post(space, a);
-    for (let index = 0; index < 12; index++) { const active = index % 2 ? b : a, next = index % 2 ? a : b; const { job } = await h.claim(active); await h.complete(active, job, `Question ${index}\nROUTE: agent:${next.id}`); }
+    for (let index = 0; index < 12; index++) { const active = index % 2 ? b : a, next = index % 2 ? a : b; await h.approve(active); const { job } = await h.claim(active); await h.complete(active, job, `Question ${index}\nROUTE: agent:${next.id}`); }
     const s = await h.call<Snapshot>("sync"); expect(s.jobs).toHaveLength(12); expect(s.threads[0]?.status).toBe("waiting");
   });
 });
@@ -114,6 +198,7 @@ describe("fallbacks, leases and write boundaries", () => {
   it("uses a configured fallback on unavailability", async () => {
     const h = setup(), b = await h.agent("Backup"), a = await h.agent("Primary", alice, { fallback: b.id }), space = await h.space();
     await h.post(space, a); await h.call("heartbeat", { agent: a.id, device: a.device, ready: false, detail: "CLI unavailable" });
+    expect((await h.claim(b)).job).toBeNull(); await h.approve(b);
     const job = await h.claim(b); expect(job.job.agent).toBe(b.id); expect(job.prompt).toContain("CLI unavailable");
   });
   it("prevents fallback cycles and cross-owner escalation", async () => {
@@ -133,11 +218,12 @@ describe("fallbacks, leases and write boundaries", () => {
     const s = await h.call<Snapshot>("sync"); expect(s.jobs).toHaveLength(1); expect(s.threads[0]?.status).toBe("error");
     expect(s.messages.at(-1)?.content).toContain("Изменения могли");
   });
-  it("allows fallback before write execution starts", async () => {
+  it("requires a separate owner write request even for fallback before execution starts", async () => {
     const h = setup(), b = await h.agent("Backup", alice, { allowWrite: true }), a = await h.agent("Writer", alice, { allowWrite: true, fallback: b.id }), space = await h.space();
     await h.post(space, a, { mode: "write" }); const { job } = await h.claim(a);
     await h.call("fail", { job: job.id, lease: job.lease, device: a.device, error: "Preflight failed" });
-    expect((await h.claim(b)).job.mode).toBe("write");
+    expect((await h.claim(b)).job).toBeNull();
+    expect((await h.call<Snapshot>("sync")).messages.at(-1)?.content).toContain("отдельный запрос владельца");
   });
   it("does not let a coworker authorize another employee's writes", async () => {
     const h = setup(), a = await h.agent("Writer", bob, { allowWrite: true }), space = await h.space(); await h.post(space, a, { mode: "write" });
@@ -145,10 +231,10 @@ describe("fallbacks, leases and write boundaries", () => {
   });
   it("never propagates write authorization along an agent handoff", async () => {
     const h = setup(), a = await h.agent("Writer", alice, { allowWrite: true }), b = await h.agent("Peer", bob, { allowWrite: true }), space = await h.space(); await h.post(space, a, { mode: "write" }); const { job } = await h.claim(a);
-    await h.complete(a, job, `Review diff\nROUTE: agent:${b.id}`); expect((await h.claim(b, bob)).job.mode).toBe("read");
+    await h.complete(a, job, `Review diff\nROUTE: agent:${b.id}`); await h.approve(b, bob); expect((await h.claim(b, bob)).job.mode).toBe("read");
   });
   it("cancels work on stop or membership removal and rejects a late answer", async () => {
-    const h = setup(), a = await h.agent("A", bob), space = await h.space(); await h.post(space, a); const { job } = await h.claim(a, bob);
+    const h = setup(), a = await h.agent("A", bob), space = await h.space(); await h.post(space, a); await h.approve(a, bob); const { job } = await h.claim(a, bob);
     await h.call("members", { space: space.id, members: [] });
     expect(await h.call("lease", { job: job.id, lease: job.lease, device: a.device }, bob)).toEqual({ cancelled: true });
     await expect(h.complete(a, job, "late\nROUTE: done", bob)).rejects.toThrow("остановлено");
@@ -178,6 +264,7 @@ describe("shared thread context", () => {
     const memory = { through: plan.through, sourceHash: plan.sourceHash, summary: "Contract proposal remains unapproved.", citations: [plan.ids[0]] };
     const complete = { job: first.job.id, lease: first.job.lease, device: a.device, content: `Review\nROUTE: agent:${b.id}`, memory };
     await h.call("complete", complete); await h.call("complete", complete);
+    await h.approve(b);
     const next = await h.call<{ context: ContextPacket }>("claim", { agent: b.id, device: b.device, contextVersion: 1 });
     expect(next.context.memory?.summary).toBe(memory.summary);
     expect(next.context.messages.some((m) => m.content.includes("Proposed contract 0"))).toBe(true);
@@ -202,6 +289,7 @@ describe("shared thread context", () => {
     await h.call("complete", { job: job.id, lease: job.lease, device: a.device, content: `Next\nROUTE: agent:${b.id}`,
       memory: { summary: "Forged", through: "other-thread", sourceHash: "bad", citations: [] },
       contextStats: { historyChars: 40000, promptChars: 20000, summaryInputChars: 30000, summaryOutputChars: 0, memoryReused: false, compacted: false } });
+    await h.approve(b);
     const next = await h.call<{ context: ContextPacket }>("claim", { agent: b.id, device: b.device, contextVersion: 1 });
     expect(next.context.memory).toBeUndefined(); expect(next.context.skipCompaction).toBe(true); expect(compactionPlan(next.context)).toBeUndefined();
   });
@@ -343,14 +431,35 @@ describe("enrollment, persistence, HTTP and notifications", () => {
     expect((await service.call(alice, "sync") as Snapshot).spaces[0]?.name).toBe("PG Space"); await store.close();
   });
   let server: Server | undefined;
-  afterEach(async () => { if (server) await new Promise<void>((resolve) => server!.close(() => resolve())); server = undefined; });
+  afterEach(async () => { if (server) { server.closeAllConnections(); await new Promise<void>((resolve) => server!.close(() => resolve())); } server = undefined; });
   it("serves the authenticated v2 API and rejects malformed and cross-origin input", async () => {
     const h = setup(); server = createServer((req, res) => void collaborationHttp(h.service, req, res));
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
     const address = server.address(); if (!address || typeof address === "string") throw new Error("no port");
     const url = `http://127.0.0.1:${address.port}`, client = new CollaborationClient(url, alice);
+    const controller = new AbortController();
+    let readyResolve!: () => void, changeResolve!: () => void;
+    const ready = new Promise<void>((resolve) => { readyResolve = resolve; });
+    const changed = new Promise<void>((resolve) => { changeResolve = resolve; });
+    const stream = client.events(controller.signal, (event) => {
+      if (event.type === "ready") readyResolve();
+      if (event.type === "change") changeResolve();
+    }).catch((error) => { if (!controller.signal.aborted) throw error; });
+    await ready;
     expect((await client.call<Snapshot>("sync")).me.id).toBe("Alice");
-    const space = await client.call<Space>("space", { name: "HTTP Team" });
+    const space = await client.call<Space>("space", { name: "HTTP Team", members: ["Bob"] });
+    await changed;
+    const bobClient = new CollaborationClient(url, bob), bobController = new AbortController();
+    let bobReadyResolve!: () => void, typingResolve!: (event: Extract<LiveEvent, { type: "typing" }>) => void;
+    const bobReady = new Promise<void>((resolve) => { bobReadyResolve = resolve; });
+    const typed = new Promise<Extract<LiveEvent, { type: "typing" }>>((resolve) => { typingResolve = resolve; });
+    const bobStream = bobClient.events(bobController.signal, (event) => {
+      if (event.type === "ready") bobReadyResolve();
+      if (event.type === "typing") typingResolve(event);
+    }).catch((error) => { if (!bobController.signal.aborted) throw error; });
+    await bobReady;
+    await client.typing({ space: space.id, channel: `general:${space.id}`, thread: null, active: true, version: 1 });
+    expect(await typed).toMatchObject({ employee: "Alice", space: space.id, active: true, version: 1 });
     const invite = await client.call<{ code: string }>("group-invite", { space: space.id });
     const anonymous = new CollaborationClient(url, "");
     await expect(anonymous.enroll(invite.code)).rejects.toThrow("имя");
@@ -359,6 +468,9 @@ describe("enrollment, persistence, HTTP and notifications", () => {
     const bad = await fetch(`${url}/v2/rpc`, { method: "POST", body: "[" }); expect(bad.status).toBe(400);
     const cors = await fetch(`${url}/v2/rpc`, { method: "POST", headers: { Origin: "https://evil.test" }, body: "{}" }); expect(cors.status).toBe(403);
     await expect(new CollaborationClient(url, "bad").call("sync")).rejects.toThrow("Нет доступа");
+    const rejectedEvents = new CollaborationClient(url, "bad").events(AbortSignal.timeout(1_000), () => {});
+    await expect(rejectedEvents).rejects.toThrow("Нет доступа");
     expect(() => hubUrl("http://public.example")).toThrow("HTTPS"); expect(() => hubUrl("https://user:password@example.com")).toThrow();
+    controller.abort(); bobController.abort(); await Promise.all([stream, bobStream]);
   });
 });

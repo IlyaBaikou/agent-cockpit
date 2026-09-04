@@ -47,7 +47,7 @@ describe("space channels", () => {
     expect(first.channels).toEqual([expect.objectContaining({ id: generalChannelId("old-space"), name: "Общий", createdAt: 42, general: true })]);
     expect(first.threads[0]).toEqual({ ...original, memory, channel: generalChannelId("old-space") });
     expect(validMemory(first.messages, first.threads[0]?.memory)).toEqual(memory);
-    expect(first.messages[0]).toEqual({ ...message, channel: generalChannelId("old-space") });
+    expect(first.messages[0]).toEqual({ ...message, channel: generalChannelId("old-space"), seq: 1 });
     expect(first.threadSubscriptions?.[0]?.following).toBe(true);
     const persistedRevision = await store.read((s) => s.revision);
     const second = await h.sync(); expect(second.revision).toBe(persistedRevision);
@@ -75,6 +75,8 @@ describe("space channels", () => {
     expect(thread.channel).toBe(game.id);
     const first = await h.claim(a); expect(first.prompt).toContain("Channel: Game 1"); expect(first.prompt).not.toContain("Unrelated math");
     await h.complete(first.job, `Peer question\nROUTE: agent:${b.id}`);
+    const pending = await h.sync("Bob"), p = pending.participations!.find((p) => p.agent === b.id)!;
+    await h.call("participation", { id: p.id, revision: p.revision, threadRevision: pending.threads[0]!.revision, action: "allow", runs: 3 }, "Bob");
     const second = await h.claim(b, "Bob"); expect(second.job.thread).toBe(thread.id); expect(second.prompt).toContain("Peer question");
     await h.complete(second.job, "Agreed\nROUTE: done", "Bob");
     const s = await h.sync();
