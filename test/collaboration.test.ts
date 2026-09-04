@@ -155,6 +155,31 @@ describe("employee-owned agents and shared spaces", () => {
     await h.complete(a, job); await h.complete(a, job);
     const s = await h.call<Snapshot>("sync"); expect(s.threads).toHaveLength(1); expect(s.messages.filter((m) => m.kind === "agent")).toHaveLength(1);
   });
+  it("turns the owner's latest read-only agent reply into one explicit write run", async () => {
+    const h = setup(), a = await h.agent("A", alice, { allowWrite: true }), space = await h.space();
+    const { thread } = await h.post(space, a); const read = await h.claim(a);
+    await h.complete(a, read.job, "Proposed diff\nROUTE: done");
+    const ready = await h.call<Snapshot>("sync"), reply = ready.messages.find((m) => m.kind === "agent")!;
+    expect(reply.agentJob).toBe(read.job.id);
+    const action = { message: reply.id, threadRevision: ready.threads[0]!.revision, requestId: "execute-once" };
+    await Promise.all([h.call("execute", action), h.call("execute", action)]);
+    const write = await h.claim(a);
+    expect(write.job.mode).toBe("write"); expect(write.job.requestedBy).toBe("Alice");
+    expect(write.prompt).toContain("Действуй: внеси предложенные изменения");
+    expect((await h.call<Snapshot>("sync")).jobs).toHaveLength(2);
+  });
+  it("rejects another employee, stale replies and agents without write permission", async () => {
+    const h = setup(), a = await h.agent("A", alice, { allowWrite: true }), space = await h.space();
+    const { thread } = await h.post(space, a); const read = await h.claim(a); await h.complete(a, read.job, "Plan\nROUTE: done");
+    const ready = await h.call<Snapshot>("sync"), reply = ready.messages.find((m) => m.kind === "agent")!;
+    await expect(h.call("execute", { message: reply.id, threadRevision: ready.threads[0]!.revision }, bob)).rejects.toThrow("владелец");
+    await h.call("post", { space: space.id, thread: thread.id, content: "Changed scope" });
+    const changed = await h.call<Snapshot>("sync");
+    await expect(h.call("execute", { message: reply.id, threadRevision: changed.threads[0]!.revision })).rejects.toThrow("не последний");
+    const b = await h.agent("B"), second = await h.post(space, b), next = await h.claim(b); await h.complete(b, next.job, "Another plan\nROUTE: done");
+    const latest = await h.call<Snapshot>("sync"), last = latest.messages.filter((m) => m.thread === second.thread.id && m.kind === "agent").at(-1)!;
+    await expect(h.call("execute", { message: last.id, threadRevision: latest.threads.find((t) => t.id === second.thread.id)!.revision })).rejects.toThrow("разрешите");
+  });
   it("stops the automatic chain when a person adds new information mid-run", async () => {
     const h = setup(), a = await h.agent("A"), b = await h.agent("B"), space = await h.space();
     const { thread } = await h.post(space, a); const { job } = await h.claim(a);

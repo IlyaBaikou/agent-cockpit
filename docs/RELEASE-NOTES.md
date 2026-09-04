@@ -1,4 +1,13 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.13.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.14.
+
+New in 0.2.14:
+
+- The latest read-only answer from your own agent now offers “Действуй — внести изменения”. One click records a visible owner instruction in the same thread and starts that agent in an isolated Git worktree; there is no need to compose another message or understand internal job terminology.
+- The coordinator, not only the UI, validates owner identity, local allow-write, answer freshness, thread revision, channel availability and the absence of concurrent work. Duplicate clicks/retries use an idempotency key and create at most one write run.
+- Read-mode prompts tell agents to ask the owner to use “Действуй” instead of exposing internal write-job wording. Other employees and peer agents still cannot grant write access. Commits, push, merge and deploy remain outside the application.
+- Existing final read replies can use the action after upgrading when their matching completed run is still in coordinator history. Update the coordinator and desktop clients; no PostgreSQL migration or credential change is required.
+
+Previous release: 0.2.13.
 
 New in 0.2.13:
 

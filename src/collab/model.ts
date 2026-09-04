@@ -25,6 +25,7 @@ export type Message = {
   id: string; space: string; thread: string | null; author: string;
   channel?: string;
   kind: "human" | "agent" | "system"; content: string; createdAt: number;
+  agentJob?: string;
   diagnosticJob?: string;
   clientRequestId?: string;
   seq?: number;

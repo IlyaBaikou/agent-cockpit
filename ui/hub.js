@@ -7,6 +7,7 @@ let mentionEnd = null, mentionIndex = -1, visibleMentions = [];
 let channelSupport = false;
 const outbox = new Map();
 const decisionsInFlight = new Set();
+const executionsInFlight = new Set();
 const readsInFlight = new Map();
 let invitationView = null;
 const drafts = new Map();
@@ -280,6 +281,28 @@ async function decideParticipation(button) {
   catch (error) { toast(errorText(error)); }
   finally { decisionsInFlight.delete(p.id); renderChat(); }
 }
+function executableAgentReply(message, messages) {
+  if (message.kind !== 'agent' || !message.thread) return null;
+  const agent = data.agents.find((a) => a.id === message.author);
+  if (!agent || agent.owner !== data.me.id) return null;
+  const last = messages.filter((m) => m.kind !== 'system').at(-1);
+  if (last?.id !== message.id) return null;
+  const sourceJob = message.agentJob
+    ? data.jobs.find((j) => j.id === message.agentJob)
+    : data.jobs.filter((j) => j.thread === message.thread && j.agent === agent.id && j.createdAt <= message.createdAt).at(-1);
+  return sourceJob?.mode === 'read' && sourceJob.status === 'done' ? agent : null;
+}
+async function executeProposal(button) {
+  const message = button.dataset.execute, thread = currentThread();
+  if (!message || !thread || executionsInFlight.has(message)) return;
+  executionsInFlight.add(message); renderChat();
+  try {
+    const result = await window.hub.call('execute', { message, threadRevision: thread.revision, requestId: crypto.randomUUID() });
+    if (result.message && !data.messages.some((m) => m.id === result.message.id)) data.messages.push(result.message);
+    if (result.thread) Object.assign(thread, result.thread);
+  } catch (error) { toast(errorText(error)); }
+  finally { executionsInFlight.delete(message); renderChat(); }
+}
 function renderChat() {
   const thread = currentThread(), space = currentSpace(), channel = currentChannel();
   const archived = channel?.archived === true;
@@ -313,7 +336,7 @@ function renderChat() {
   const following = data.threadSubscriptions?.some((f) => f.thread === threadId && f.following) ?? false;
   $("follow-thread").textContent = following ? "✓ Вы подписаны на тред" : "Подписаться на тред";
   $("follow-thread").setAttribute("aria-pressed", String(following));
-  const key = JSON.stringify([spaceId, channelId, threadId, messages, cards, thread?.memory, thread?.revision, participations, [...decisionsInFlight], data.readPositions, data.employees, data.agents.map((a) => [a.id, a.name, a.owner]), data.jobs.filter((j) => j.thread === threadId).map((j) => [j.id,j.status,Boolean(j.diagnostic)])]);
+  const key = JSON.stringify([spaceId, channelId, threadId, messages, cards, thread?.memory, thread?.revision, participations, [...decisionsInFlight], [...executionsInFlight], data.readPositions, data.employees, data.agents.map((a) => [a.id, a.name, a.owner, a.allowWrite]), data.jobs.filter((j) => j.thread === threadId).map((j) => [j.id,j.status,j.mode,Boolean(j.diagnostic)])]);
   if (key === renderKey) { scheduleRead(); return; }
   const previousTop = $('messages').scrollTop;
   const wasNearBottom = $("messages").scrollHeight - $("messages").scrollTop - $("messages").clientHeight < 110;
@@ -326,11 +349,15 @@ function renderChat() {
     const m = entry.message;
     if (m.kind === "system") return `<div class="system">${inline(m.content)}${m.diagnosticJob ? (data.jobs.some((j) => j.id === m.diagnosticJob && j.diagnostic) ? ` <button class="quiet diagnostic-button" data-diagnostic="${esc(m.diagnosticJob)}">Подробности ошибки</button>` : '<br><small>Подробности доступны владельцу агента / оператору хаба, если срок хранения не истёк.</small>') : ""}</div>`;
     const agent = data.agents.find((a) => a.id === m.author);
+    const executable = executableAgentReply(m, messages);
+    const executing = executionsInFlight.has(m.id);
+    const executeAction = executable ? `<div class="message-actions"><button type="button" class="primary" data-execute="${esc(m.id)}" ${executing || archived || !appState.connected || !executable.allowWrite ? 'disabled' : ''}>${executing ? 'Запускаю…' : 'Действуй — внести изменения'}</button><small>${executable.allowWrite ? 'Агент начнёт работу в отдельной Git-копии. Коммиты и push не выполняются.' : 'Сначала включите разрешение на изменения в настройках агента.'}</small></div>` : '';
     const delivery = m.delivery === "sending" ? '<span class="delivery sending" role="status">Отправляется…</span>' : m.delivery === "failed" ? '<span class="delivery failed" role="status">Отправка не подтверждена</span>' : m.author === data.me.id && m.kind === "human" ? '<span class="delivery sent" title="Принято хабом — это не отметка о прочтении">✓ Отправлено</span>' : '';
-    return `<article class="message ${m.kind} ${m.delivery ?? ''}" data-message="${esc(m.id)}"><span class="avatar">${esc(initials(name(m.author)))}</span><div class="message-main"><div class="message-head"><strong>${esc(name(m.author))}</strong>${agent ? `<span class="agent-tag">АГЕНТ · ${esc(name(agent.owner))}</span>` : ""}<time>${time(m.createdAt)}</time>${delivery}</div><div class="message-body">${markdown(m.content)}</div>${m.delivery === 'failed' ? `<div class="delivery-error">${esc(m.deliveryError)} <button type="button" class="quiet" data-retry="${esc(m.requestId)}">Повторить отправку</button><small>Повтор использует тот же идентификатор и не запускает агента второй раз. Сообщение остаётся здесь, пока приложение открыто.</small></div>` : ''}</div></article>`;
+    return `<article class="message ${m.kind} ${m.delivery ?? ''}" data-message="${esc(m.id)}"><span class="avatar">${esc(initials(name(m.author)))}</span><div class="message-main"><div class="message-head"><strong>${esc(name(m.author))}</strong>${agent ? `<span class="agent-tag">АГЕНТ · ${esc(name(agent.owner))}</span>` : ""}<time>${time(m.createdAt)}</time>${delivery}</div><div class="message-body">${markdown(m.content)}</div>${executeAction}${m.delivery === 'failed' ? `<div class="delivery-error">${esc(m.deliveryError)} <button type="button" class="quiet" data-retry="${esc(m.requestId)}">Повторить отправку</button><small>Повтор использует тот же идентификатор и не запускает агента второй раз. Сообщение остаётся здесь, пока приложение открыто.</small></div>` : ''}</div></article>`;
   }).join("") || `<div class="empty"><div class="symbol">${space ? "↗" : "✳"}</div><h3>${space ? "Начните с вопроса" : "Команда начинается со спейса"}</h3><p>${space ? "Напишите коллеге или вызовите агента через @. Он увидит историю этого треда и сможет подключить другого агента." : "Создайте пространство, добавьте коллег и подключите своих агентов. Никаких заданных ролей."}</p></div>`;
   $("messages").querySelectorAll("[data-open-thread]").forEach((button) => button.onclick = () => navigate(spaceId, button.dataset.openThread));
   $("messages").querySelectorAll("[data-diagnostic]").forEach((button) => button.onclick = () => showDiagnostic(button.dataset.diagnostic));
+  $("messages").querySelectorAll("[data-execute]").forEach((button) => button.onclick = () => void executeProposal(button));
   $("messages").querySelectorAll("[data-retry]").forEach((button) => {
     button.disabled = sending || archived || !appState.connected;
     button.onclick = () => { const pending = outbox.get(button.dataset.retry); if (pending) void deliverPost(pending); };
