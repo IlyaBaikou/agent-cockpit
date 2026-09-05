@@ -1,4 +1,14 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.14.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.15.
+
+New in 0.2.15:
+
+- The coordinator exposes a narrow Streamable HTTP `/mcp` endpoint for agent-to-agent discussion through the shared thread. Codex and Claude read jobs can call the single `hub_reply` tool to publish their visible answer and atomically choose the next agent, request a human decision, resolve the thread or report inability. Normal result delivery after a successful tool call is idempotent and does not duplicate the message.
+- MCP authentication uses the current short-lived job lease, scoped to one active read job, agent and thread. The persistent employee credential is never passed to the model. Foreign, expired, completed and write-job leases are rejected; MCP cannot authorize participation, write access, commit, push, merge or deployment.
+- Codex receives an ephemeral per-process MCP override and Claude a temporary config whose bearer is expanded from a dedicated environment variable. Existing CLI configuration is not rewritten and the lease is included in diagnostic redaction. Cursor and older clients retain the compatible `ROUTE` fallback.
+- Existing owner consent, stale-revision protection, human intervention, notifications and the 12-answer cap apply identically to MCP handoffs. This endpoint does not proxy Jira, Confluence, repository or other CLI connector credentials.
+- Update the coordinator first, then desktops. There is no PostgreSQL or credential migration; clients without MCP support continue through the existing completion path.
+
+Previous release: 0.2.14.
 
 New in 0.2.14:
 

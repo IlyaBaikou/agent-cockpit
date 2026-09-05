@@ -50,6 +50,25 @@ it("retries delivery without executing the agent twice", async () => {
   } finally { runner.stop(); await rm(f.dir, { recursive: true, force: true }); }
 });
 
+it("binds MCP to the current read job lease and accepts its terminal reply once", async () => {
+  const f = await fixture(); let lease = "";
+  const adapter: AgentAdapter = { id: "codex", healthCheck: async () => "ready", run: async (request) => {
+    expect(request.mcp?.url).toBe("http://localhost/mcp");
+    lease = request.mcp!.bearerToken;
+    expect(lease).not.toBe(token);
+    await f.service.completeMcp(lease, { content: "Published by MCP", next: "done" });
+    return { agent: "codex", content: "MCP accepted the reply" };
+  } };
+  const runner = new EmployeeRunner(f.client, f.agent, "test-device", join(f.dir, "worktrees"), { check: async () => "ready", adapter: () => adapter });
+  try {
+    await f.post(); runner.start(); await until(async () => (await f.snapshot()).threads[0]?.status === "resolved");
+    const snapshot = await f.snapshot();
+    expect(snapshot.messages.filter((message) => message.kind === "agent")).toHaveLength(1);
+    expect(snapshot.messages.find((message) => message.kind === "agent")?.content).toContain("Published by MCP");
+    await expect(f.service.authorizeMcp("not-the-lease")).rejects.toThrow("токен");
+  } finally { runner.stop(); await rm(f.dir, { recursive: true, force: true }); }
+});
+
 it("does not run a model or summary for an incoming request until the owner approves", async () => {
   const f = await fixture(); let runs = 0;
   const invite = await f.client.call<{ code: string; employee: string }>("invite", { name: "Peer" });
@@ -77,6 +96,7 @@ it("isolates v2 write jobs and delivers the diff without changing the original c
   await runProcess("git", ["add", "contract.md"], { cwd: f.dir }); await runProcess("git", ["commit", "-m", "fixture"], { cwd: f.dir });
   const adapter: AgentAdapter = { id: "codex", healthCheck: async () => "ready", run: async (request) => {
     writtenPath = request.repositoryPath; expect(request.mode).toBe("write");
+    expect(request.mcp).toBeUndefined();
     await writeFile(join(writtenPath, "contract.md"), "after\n"); return { agent: "codex", content: "Changed contract\nROUTE: done" };
   } };
   const runner = new EmployeeRunner(f.client, f.agent, "test-device", join(f.dir, "worktrees"), { check: async () => "ready", adapter: () => adapter });

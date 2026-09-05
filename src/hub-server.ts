@@ -5,6 +5,7 @@ import type { ConversationHub, RunnerArtifactInput } from "./conversations.js";
 import { parseRunnerCredentials, type RunnerCredential } from "./runner-auth.js";
 import type { AgentId, RunnerJobMode } from "./types.js";
 import { collaborationHttp } from "./collab/http.js";
+import { collaborationMcpHttp } from "./collab/mcp.js";
 import type { CollaborationService } from "./collab/service.js";
 
 function json(response: ServerResponse, status: number, value: unknown): void {
@@ -48,10 +49,15 @@ export function createHubHttpServer(options: {
   const credentials = options.credentials ?? parseRunnerCredentials();
   const controlCredentials = options.controlCredentials ?? parseControlCredentials();
   const leaseMs = options.leaseMs ?? Number(process.env.HUB_RUNNER_LEASE_MS ?? 900_000);
+  const mcp = options.collaboration ? collaborationMcpHttp(options.collaboration) : undefined;
 
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://agent-hub.local");
+      if (url.pathname === "/mcp" && mcp) {
+        await mcp(request, response);
+        return;
+      }
       if (url.pathname.startsWith("/v2/") && options.collaboration) {
         await collaborationHttp(options.collaboration, request, response);
         return;

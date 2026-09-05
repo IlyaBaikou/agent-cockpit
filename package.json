@@ -1,6 +1,6 @@
 {
   "name": "@animaplay/agent-hub",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "description": "Employee-owned agents, shared spaces and collaborative threads",
   "author": "AnimaPlay",
   "license": "UNLICENSED",
@@ -36,12 +36,16 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "@slack/bolt": "^4.4.0",
     "cross-spawn": "^7.0.6",
     "dotenv": "^17.2.2",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^24.5.2",
     "@types/pg": "^8.23.1",

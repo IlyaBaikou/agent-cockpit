@@ -1,9 +1,11 @@
-import { stat, readdir } from "node:fs/promises";
+import { stat, readdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentFailure, runAgentProcess, checkWorkspace } from "./diagnostics.js";
 import { parseCliOutput } from "./cli-output.js";
 import type { AgentAdapter, AgentRequest, AgentResult } from "./adapter.js";
+import { buildAgentEnvironment } from "../environment.js";
 
 type ClaudeAuthStatus = {
   loggedIn?: boolean;
@@ -97,32 +99,45 @@ export class ClaudeAdapter implements AgentAdapter {
           request.prompt,
         ].join("\n");
 
-    const result = await runAgentProcess(
-      "claude", "run", binary,
-      [
-        "--print",
-        "--output-format",
-        "json",
-        "--permission-mode",
-        writeMode ? "acceptEdits" : "plan",
-        "--tools",
-        writeMode ? "Read,Glob,Grep,Edit,Write" : "Read,Glob,Grep",
-        "--no-session-persistence",
-        prompt,
-      ],
-      { cwd: request.repositoryPath, timeoutMs: this.#timeoutMs, ...(request.signal ? { signal: request.signal } : {}) }, [prompt, request.prompt],
-    );
+    const tempDirectory = request.mcp ? await mkdtemp(join(tmpdir(), "animaplay-agent-hub-claude-mcp-")) : undefined;
+    const mcpConfig = tempDirectory ? join(tempDirectory, "mcp.json") : undefined;
+    if (mcpConfig && request.mcp) await writeFile(mcpConfig, JSON.stringify({ mcpServers: { agent_hub: {
+      type: "http", url: request.mcp.url, headers: { Authorization: "Bearer ${AGENT_HUB_MCP_JOB_TOKEN}" },
+    } } }), { mode: 0o600 });
+    try {
+      const result = await runAgentProcess(
+        "claude", "run", binary,
+        [
+          "--print",
+          "--output-format",
+          "json",
+          "--permission-mode",
+          writeMode ? "acceptEdits" : "plan",
+          "--tools",
+          writeMode ? "Read,Glob,Grep,Edit,Write" : "Read,Glob,Grep",
+          ...(mcpConfig ? ["--mcp-config", mcpConfig, "--allowedTools", "mcp__agent_hub__hub_reply"] : []),
+          "--no-session-persistence",
+          prompt,
+        ],
+        { cwd: request.repositoryPath, timeoutMs: this.#timeoutMs,
+          ...(request.mcp ? { env: { ...buildAgentEnvironment(), AGENT_HUB_MCP_JOB_TOKEN: request.mcp.bearerToken } } : {}),
+          ...(request.signal ? { signal: request.signal } : {}) },
+        [prompt, request.prompt, request.mcp?.bearerToken ?? ""],
+      );
 
-    const parsed = parseCliOutput(result.stdout);
-    if (result.exitCode !== 0 || parsed.failed || !parsed.content) {
-      throw agentFailure({ provider: "claude", stage: "response", binary, result, detail: parsed.error,
-        code: result.exitCode !== 0 || parsed.failed ? "cli_failed" : !parsed.complete ? "invalid_response" : "empty_response", sensitive: [prompt, request.prompt] });
+      const parsed = parseCliOutput(result.stdout);
+      if (result.exitCode !== 0 || parsed.failed || !parsed.content) {
+        throw agentFailure({ provider: "claude", stage: "response", binary, result, detail: parsed.error,
+          code: result.exitCode !== 0 || parsed.failed ? "cli_failed" : !parsed.complete ? "invalid_response" : "empty_response", sensitive: [prompt, request.prompt, request.mcp?.bearerToken ?? ""] });
+      }
+
+      return {
+        agent: this.id,
+        content: parsed.content,
+        ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
+      };
+    } finally {
+      if (tempDirectory) await rm(tempDirectory, { recursive: true, force: true });
     }
-
-    return {
-      agent: this.id,
-      content: parsed.content,
-      ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
-    };
   }
 }

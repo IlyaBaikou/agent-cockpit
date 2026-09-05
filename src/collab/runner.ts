@@ -76,9 +76,9 @@ export class EmployeeRunner extends EventEmitter {
     const renew = setInterval(() => {
       if (leaseBusy) return;
       leaseBusy = true;
-      void this.client.call<{ cancelled: boolean }>("lease", leaseBody).then((result) => {
+      void this.client.call<{ cancelled: boolean; terminal?: boolean }>("lease", leaseBody).then((result) => {
         lostSince = 0;
-        if (result.cancelled) this.#abort?.abort();
+        if (result.cancelled && !result.terminal) this.#abort?.abort();
       }).catch((error: unknown) => {
         if (!lostSince) lostSince = Date.now();
         if (error instanceof ApiError || Date.now() - lostSince > 25_000) this.#abort?.abort();
@@ -126,8 +126,10 @@ export class EmployeeRunner extends EventEmitter {
           summaryOutputChars, memoryReused: Boolean(packet.memory), compacted: Boolean(memory) };
       }
       if (this.#abort.signal.aborted || (await this.client.call<{ cancelled: boolean }>("lease", { ...leaseBody, contextRevision: job.revision })).cancelled) throw new Error("Задание остановлено или человек обновил условия; вызовите агента с актуальным запросом");
+      const mcp = job.mode === "read" && job.lease ? { url: `${this.client.url}/mcp`, bearerToken: job.lease } : undefined;
+      if (mcp) prompt += "\n\nAgent Hub MCP is available for this turn. When your answer is ready, prefer calling its hub_reply tool exactly once instead of printing a ROUTE line. If the tool is unavailable, keep the final ROUTE line as a compatibility fallback.";
       const input = await promptArgument(prompt); cleanup.push(input.cleanup);
-      const result = await this.dependencies.adapter(this.agent).run({ repositoryPath: workspace, prompt: input.prompt, mode: job.mode, signal: this.#abort.signal, protocol: "collaboration" });
+      const result = await this.dependencies.adapter(this.agent).run({ repositoryPath: workspace, prompt: input.prompt, mode: job.mode, signal: this.#abort.signal, protocol: "collaboration", ...(mcp ? { mcp } : {}) });
       let content = result.content;
       if (job.mode === "write") {
         const diff = await new GitWorktreeManager(this.worktreesRoot).diff(workspace);

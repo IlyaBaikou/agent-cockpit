@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentFailure, runAgentProcess, checkWorkspace } from "./diagnostics.js";
 import type { AgentAdapter, AgentRequest, AgentResult } from "./adapter.js";
+import { buildAgentEnvironment } from "../environment.js";
 
 export async function resolveCodexBinary(explicit?: string): Promise<string> {
   if (explicit) return explicit;
@@ -51,6 +52,13 @@ export class CodexAdapter implements AgentAdapter {
 
     try {
       const writeMode = request.mode === "write";
+      const mcpArgs = request.mcp ? [
+        "-c", `mcp_servers.agent_hub.url=${JSON.stringify(request.mcp.url)}`,
+        "-c", "mcp_servers.agent_hub.bearer_token_env_var=\"AGENT_HUB_MCP_JOB_TOKEN\"",
+        "-c", "mcp_servers.agent_hub.required=false",
+        "-c", "mcp_servers.agent_hub.enabled_tools=[\"hub_reply\"]",
+        "-c", "mcp_servers.agent_hub.tools.hub_reply.approval_mode=\"approve\"",
+      ] : [];
       const prompt = request.purpose === "summary" ? request.prompt : writeMode
         ? [
             "You are the assigned implementation agent in an isolated Git worktree.",
@@ -72,6 +80,7 @@ export class CodexAdapter implements AgentAdapter {
       const result = await runAgentProcess(
         "codex", "run", binary,
         [
+          ...mcpArgs,
           "--sandbox",
           writeMode ? "workspace-write" : "read-only",
           "--ask-for-approval",
@@ -87,16 +96,19 @@ export class CodexAdapter implements AgentAdapter {
           outputPath,
           prompt,
         ],
-        { cwd: request.repositoryPath, timeoutMs: this.#timeoutMs, ...(request.signal ? { signal: request.signal } : {}) }, [prompt, request.prompt],
+        { cwd: request.repositoryPath, timeoutMs: this.#timeoutMs,
+          ...(request.mcp ? { env: { ...buildAgentEnvironment(), AGENT_HUB_MCP_JOB_TOKEN: request.mcp.bearerToken } } : {}),
+          ...(request.signal ? { signal: request.signal } : {}) },
+        [prompt, request.prompt, request.mcp?.bearerToken ?? ""],
       );
 
       if (result.exitCode !== 0) {
-        throw agentFailure({ provider: "codex", stage: "response", binary, result, sensitive: [prompt, request.prompt] });
+        throw agentFailure({ provider: "codex", stage: "response", binary, result, sensitive: [prompt, request.prompt, request.mcp?.bearerToken ?? ""] });
       }
 
       const content = (await readFile(outputPath, "utf8").catch(() => "")).trim();
       if (!content) {
-        throw agentFailure({ provider: "codex", stage: "response", binary, result, code: "empty_response", sensitive: [prompt, request.prompt] });
+        throw agentFailure({ provider: "codex", stage: "response", binary, result, code: "empty_response", sensitive: [prompt, request.prompt, request.mcp?.bearerToken ?? ""] });
       }
       return { agent: this.id, content };
     } finally {

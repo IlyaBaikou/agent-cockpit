@@ -105,6 +105,44 @@ export class CollaborationService {
     this.publish(delivery.event, new Set(delivery.members));
   }
 
+  async authorizeMcp(token: string): Promise<{ job: string; agent: string; thread: string; expiresAt: number }> {
+    return await this.store.read((s) => {
+      const job = this.mcpJob(s, token, true);
+      requireValue(job.mode === "read", "MCP-передача доступна только для обсуждения", 403);
+      return { job: job.id, agent: job.agent, thread: job.thread, expiresAt: job.expiresAt };
+    });
+  }
+
+  async completeMcp(token: string, input: { content: string; next: "agent" | "human" | "done" | "unable"; target?: string }): Promise<{ ok: true; message: string; status: Thread["status"] }> {
+    const result = await this.store.transact((s) => {
+      migrateChannels(s);
+      migrateReadState(s);
+      this.migrateParticipation(s);
+      this.sweep(s);
+      const job = this.mcpJob(s, token, true);
+      requireValue(job.mode === "read", "MCP-передача доступна только для обсуждения. Изменения завершает локальный раннер.", 403);
+      if (job.status === "done") {
+        const existing = s.messages.find((m) => m.agentJob === job.id);
+        return { ok: true as const, message: existing?.id ?? "", status: s.threads.find((t) => t.id === job.thread)!.status };
+      }
+      requireValue(job.status === "running", "Задание уже остановлено; ответ через MCP не принят", 409);
+      const content = field(input.content, "Ответ", 180_000);
+      requireValue(["agent", "human", "done", "unable"].includes(input.next), "Выберите следующий шаг");
+      const needsTarget = input.next === "agent" || input.next === "human";
+      requireValue(needsTarget === Boolean(input.target), needsTarget ? "Укажите target для адресата" : "Для этого шага target не нужен");
+      const route = input.next === "done" || input.next === "unable" ? input.next : `${input.next}:${field(input.target, "Адресат")}`;
+      const thread = s.threads.find((t) => t.id === job.thread)!;
+      const space = s.spaces.find((sp) => sp.id === thread.space)!;
+      const preview = addressReply(`${content}\nROUTE: ${route}`, job.requestedBy, job.agent, space.members,
+        s.agents.filter((a) => a.enabled && space.members.includes(a.owner)).map((a) => a.id));
+      requireValue(!preview.error, preview.error ?? "Неверный адресат", 409);
+      const completed = this.completeJob(s, job, { content: `${content}\nROUTE: ${route}` });
+      return { ok: true as const, message: completed.message, status: completed.status };
+    });
+    this.publish({ type: "change" });
+    return result;
+  }
+
   private publish(event: LiveEvent, recipients?: Set<string>): void {
     for (const subscriber of this.subscribers.values()) {
       if (recipients && !recipients.has(subscriber.actor)) continue;
@@ -321,7 +359,7 @@ export class CollaborationService {
       }
       case "lease": {
         const job = this.leased(s, actor, b, true);
-        if (!this.active(job)) return { cancelled: true };
+        if (!this.active(job)) return { cancelled: true, ...(job.status === "done" ? { terminal: true } : {}) };
         if (typeof b.contextRevision === "number" && s.threads.find((t) => t.id === job.thread)?.revision !== b.contextRevision) return { cancelled: true };
         job.expiresAt = this.now() + LEASE;
         const agent = s.agents.find((a) => a.id === job.agent)!;
@@ -333,54 +371,7 @@ export class CollaborationService {
         const job = this.leased(s, actor, b, true);
         if (job.status === "done") return { ok: true };
         requireValue(job.status === "running", "Задание уже остановлено; результат не отправлен повторно", 409);
-        const content = field(b.content, "Ответ", 180_000);
-        const thread = s.threads.find((t) => t.id === job.thread)!;
-        const space = s.spaces.find((sp) => sp.id === thread.space)!;
-        const addressed = addressReply(content, job.requestedBy, job.agent, space.members,
-          s.agents.filter((a) => a.enabled && space.members.includes(a.owner)).map((a) => a.id));
-        const visible = addressed.content, route = addressed.route;
-        if (job.contextThrough && thread.revision === job.revision) {
-          const memory = acceptMemory(this.context(s, job), b.memory, job.agent, this.now());
-          if (memory) thread.memory = memory;
-        }
-        if (b.contextStats && typeof b.contextStats === "object") {
-          const stats = b.contextStats as ContextStats;
-          if ([stats.historyChars, stats.promptChars, stats.summaryInputChars, stats.summaryOutputChars]
-            .every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 100_000_000)
-            && typeof stats.memoryReused === "boolean" && typeof stats.compacted === "boolean") job.contextStats = {
-              historyChars: stats.historyChars, promptChars: stats.promptChars, summaryInputChars: stats.summaryInputChars,
-              summaryOutputChars: stats.summaryOutputChars, memoryReused: stats.memoryReused, compacted: stats.compacted,
-            };
-        }
-        job.status = "done";
-        const reply = this.message(s, thread.space, thread.id, job.agent, "agent", visible || "Обработка завершена.");
-        reply.agentJob = job.id;
-        if (!addressed.error && thread.revision === job.revision && route?.startsWith("human:")) {
-          this.notice(s, route.slice(6), "Нужно ваше решение", visible, thread.space, thread.id, reply.channel, reply.id);
-        }
-        this.notifyDiscussion(s, reply);
-        this.notice(s, job.requestedBy, `${this.name(s, job.agent)} ответил`, visible.slice(0, 160), thread.space, thread.id, reply.channel, reply.id);
-        if (thread.revision !== job.revision) {
-          thread.status = "waiting";
-          this.message(s, thread.space, thread.id, "hub", "system", "Во время работы поступило сообщение человека. Ответ сохранён; автоматическая передача приостановлена. Упомяните нужного агента для продолжения.");
-          return { ok: true };
-        }
-        if (addressed.error) { this.failThread(s, thread, job.requestedBy, addressed.error); return { ok: true }; }
-        if (route === "unable") { this.fallback(s, job, "Агент сообщил, что не может обработать запрос"); return { ok: true }; }
-        if (route?.startsWith("agent:")) {
-          const target = route.slice(6);
-          if (job.remaining <= 1) this.wait(s, thread, job.requestedBy, "Достигнут лимит 12 ответов. Нужен человек для продолжения.");
-          else this.route(s, thread, target, job.requestedBy, "read", job.remaining - 1, [], false, reply.id);
-        } else if (route?.startsWith("human:")) {
-          const member = route.slice(6);
-          const space = s.spaces.find((sp) => sp.id === thread.space)!;
-          if (!space.members.includes(member)) this.failThread(s, thread, job.requestedBy, "Агент запросил сотрудника вне спейса");
-          else this.wait(s, thread, member, "Нужно решение человека. Ответьте и укажите агента для продолжения.", reply.id);
-        } else if (route === "done") {
-          thread.status = "resolved";
-          this.revokeParticipation(s, (p) => p.thread === thread.id);
-          this.notice(s, thread.owner, "Обсуждение завершено", thread.title, thread.space, thread.id, reply.channel, reply.id);
-        } else this.wait(s, thread, job.requestedBy, "Ответ получен без команды продолжения. Можно продолжить вручную через @упоминание.");
+        this.completeJob(s, job, b);
         return { ok: true };
       }
       case "fail": {
@@ -588,6 +579,62 @@ export class CollaborationService {
     this.ownedAgent(s, actor, job.agent, b.device);
     requireValue(allowTerminal || job.status === "running", "Задание не выполняется", 409);
     return job;
+  }
+  private mcpJob(s: State, token: string, allowTerminal = false): Job {
+    requireValue(typeof token === "string" && token.length >= 32, "Недействительный токен MCP-задания", 401);
+    const job = s.jobs.find((j) => j.lease && secureTokenMatch(j.lease, token));
+    requireValue(job && job.expiresAt >= this.now() && (job.status === "running" || (allowTerminal && job.status === "done")), "MCP-задание истекло или остановлено", 401);
+    return job;
+  }
+  private completeJob(s: State, job: Job, b: Record<string, unknown>): { message: string; status: Thread["status"] } {
+    const content = field(b.content, "Ответ", 180_000);
+    const thread = s.threads.find((t) => t.id === job.thread)!;
+    const space = s.spaces.find((sp) => sp.id === thread.space)!;
+    const addressed = addressReply(content, job.requestedBy, job.agent, space.members,
+      s.agents.filter((a) => a.enabled && space.members.includes(a.owner)).map((a) => a.id));
+    const visible = addressed.content, route = addressed.route;
+    if (job.contextThrough && thread.revision === job.revision) {
+      const memory = acceptMemory(this.context(s, job), b.memory, job.agent, this.now());
+      if (memory) thread.memory = memory;
+    }
+    if (b.contextStats && typeof b.contextStats === "object") {
+      const stats = b.contextStats as ContextStats;
+      if ([stats.historyChars, stats.promptChars, stats.summaryInputChars, stats.summaryOutputChars]
+        .every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 100_000_000)
+        && typeof stats.memoryReused === "boolean" && typeof stats.compacted === "boolean") job.contextStats = {
+          historyChars: stats.historyChars, promptChars: stats.promptChars, summaryInputChars: stats.summaryInputChars,
+          summaryOutputChars: stats.summaryOutputChars, memoryReused: stats.memoryReused, compacted: stats.compacted,
+        };
+    }
+    job.status = "done";
+    const reply = this.message(s, thread.space, thread.id, job.agent, "agent", visible || "Обработка завершена.");
+    reply.agentJob = job.id;
+    if (!addressed.error && thread.revision === job.revision && route?.startsWith("human:")) {
+      this.notice(s, route.slice(6), "Нужно ваше решение", visible, thread.space, thread.id, reply.channel, reply.id);
+    }
+    this.notifyDiscussion(s, reply);
+    this.notice(s, job.requestedBy, `${this.name(s, job.agent)} ответил`, visible.slice(0, 160), thread.space, thread.id, reply.channel, reply.id);
+    if (thread.revision !== job.revision) {
+      thread.status = "waiting";
+      this.message(s, thread.space, thread.id, "hub", "system", "Во время работы поступило сообщение человека. Ответ сохранён; автоматическая передача приостановлена. Упомяните нужного агента для продолжения.");
+      return { message: reply.id, status: thread.status };
+    }
+    if (addressed.error) this.failThread(s, thread, job.requestedBy, addressed.error);
+    else if (route === "unable") this.fallback(s, job, "Агент сообщил, что не может обработать запрос");
+    else if (route?.startsWith("agent:")) {
+      const target = route.slice(6);
+      if (job.remaining <= 1) this.wait(s, thread, job.requestedBy, "Достигнут лимит 12 ответов. Нужен человек для продолжения.");
+      else this.route(s, thread, target, job.requestedBy, "read", job.remaining - 1, [], false, reply.id);
+    } else if (route?.startsWith("human:")) {
+      const member = route.slice(6);
+      if (!space.members.includes(member)) this.failThread(s, thread, job.requestedBy, "Агент запросил сотрудника вне спейса");
+      else this.wait(s, thread, member, "Нужно решение человека. Ответьте и укажите агента для продолжения.", reply.id);
+    } else if (route === "done") {
+      thread.status = "resolved";
+      this.revokeParticipation(s, (p) => p.thread === thread.id);
+      this.notice(s, thread.owner, "Обсуждение завершено", thread.title, thread.space, thread.id, reply.channel, reply.id);
+    } else this.wait(s, thread, job.requestedBy, "Ответ получен без команды продолжения. Можно продолжить вручную через @упоминание.");
+    return { message: reply.id, status: thread.status };
   }
   private space(s: State, actor: string, id: unknown): Space {
     const space = s.spaces.find((sp) => sp.id === id && sp.members.includes(actor));

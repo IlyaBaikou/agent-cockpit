@@ -38,6 +38,14 @@ Read [the full pilot guide](docs/COLLABORATION-MVP.md) for routing, trust bounda
 
 Desktop clients receive change signals over an authenticated server-sent event stream and immediately refresh their access-filtered view. Messages still use acknowledged, idempotent HTTPS POST; a 30-second sync remains as recovery after network/proxy interruptions. Human typing presence is scoped to the exact conversation, expires after five seconds, is not persisted and never enters model context. This pilot transport assumes one coordinator replica; add a shared event bus before horizontal scaling. See [architecture](ARCHITECTURE.md) for the protocol and rollout notes.
 
+## Job-scoped MCP handoffs (0.2.15)
+
+Codex and Claude read jobs can finish through the coordinator's Streamable HTTP MCP endpoint. The single `hub_reply` tool publishes the answer and chooses the next agent, human decision, completion or failure in one transaction, so humans still see and can interrupt the entire discussion in its thread. This is hub-mediated communication, not a private model-to-model connection.
+
+Each invocation receives only its short-lived job lease, never the employee's persistent credential. Existing owner consent, thread revision, handoff cap and write restrictions remain authoritative. User MCP settings are not modified. Cursor and older clients continue through the compatible visible `ROUTE` fallback. Jira, Confluence and repository connectors remain local to each CLI and keep their own authentication.
+
+Update the coordinator first, then desktops to 0.2.15. No database or credential migration is required; old clients continue to work through the fallback path.
+
 ## Agent mentions and handoffs (0.2.8)
 
 Agent replies visibly tag the person who should respond or the next agent. Human tags create notifications; a single peer tag hands off in the same thread, subject to owner approval and the remaining budget. The coordinator also adds missing tags from existing `ROUTE` directives. Code examples and quotes never call agents; conflicting/multiple targets stop with a visible error. Click a tag to prepare a reply, without sending it automatically. See [architecture](ARCHITECTURE.md) for the exact addressing and notification rules.

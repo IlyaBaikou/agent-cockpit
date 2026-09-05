@@ -7,6 +7,7 @@ export type AgentRequest = {
   signal?: AbortSignal;
   protocol?: "collaboration";
   purpose?: "summary";
+  mcp?: { url: string; bearerToken: string };
 };
 
 export type AgentResult = {

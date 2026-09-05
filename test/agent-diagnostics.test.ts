@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentExecutionError, acceptDiagnostic, agentFailure, classifyFailure, redact } from "../src/agents/diagnostics.js";
 import { parseCliOutput } from "../src/agents/cli-output.js";
 import { ClaudeAdapter, resolveClaudeBinary } from "../src/agents/claude.js";
+import { CodexAdapter } from "../src/agents/codex.js";
 import { CursorAdapter } from "../src/agents/cursor.js";
 import { ProcessError, runProcess } from "../src/process.js";
 
@@ -101,6 +102,30 @@ describe("actionable and redacted errors", () => {
     run.mockResolvedValue(result('{"result":"Done"}'));
     await new CursorAdapter({ binary: "fake" }).run({ ...request, mode: "write" });
     expect(run.mock.calls[0]![1]).toContain("--force"); expect(run.mock.calls[0]![1]).not.toContain("--mode=agent");
+  });
+  it("injects a temporary job-scoped MCP connection into Codex and Claude without persisting its token", async () => {
+    const lease = "job-lease-secret-that-must-not-be-persisted";
+    run.mockImplementationOnce(async (_command, args, options) => {
+      expect(args).toContain("mcp_servers.agent_hub.bearer_token_env_var=\"AGENT_HUB_MCP_JOB_TOKEN\"");
+      expect(args.join(" ")).not.toContain(lease);
+      expect(options?.env?.AGENT_HUB_MCP_JOB_TOKEN).toBe(lease);
+      const output = args[args.indexOf("--output-last-message") + 1]!;
+      await writeFile(output, "Codex used MCP");
+      return result();
+    });
+    await expect(new CodexAdapter({ binary: "fake-codex" }).run({ ...request, mcp: { url: "https://hub.example/mcp", bearerToken: lease } })).resolves.toMatchObject({ content: "Codex used MCP" });
+
+    run.mockImplementationOnce(async (_command, args, options) => {
+      const configPath = args[args.indexOf("--mcp-config") + 1]!;
+      const config = await readFile(configPath, "utf8");
+      expect(config).toContain("https://hub.example/mcp");
+      expect(config).toContain("${AGENT_HUB_MCP_JOB_TOKEN}");
+      expect(config).not.toContain(lease);
+      expect(args).toContain("mcp__agent_hub__hub_reply");
+      expect(options?.env?.AGENT_HUB_MCP_JOB_TOKEN).toBe(lease);
+      return result(JSON.stringify({ type: "result", result: "Claude used MCP" }));
+    });
+    await expect(new ClaudeAdapter({ binary: "fake-claude" }).run({ ...request, mcp: { url: "https://hub.example/mcp", bearerToken: lease } })).resolves.toMatchObject({ content: "Claude used MCP" });
   });
 });
 
