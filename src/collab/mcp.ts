@@ -24,7 +24,7 @@ export function collaborationMcpHttp(service: CollaborationService): (request: I
     const token = context.authInfo?.token;
     if (!token) throw new Error("Agent Hub MCP request is missing job authorization");
     const server = new McpServer(
-      { name: "animaplay-agent-hub", version: "0.2.15" },
+      { name: "animaplay-agent-hub", version: "0.2.16" },
       { instructions },
     );
     server.registerTool("hub_reply", {

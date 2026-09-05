@@ -45,12 +45,15 @@ describe("job-scoped Agent Hub MCP", () => {
 
     // Normal runner delivery after the MCP terminal call is idempotent and
     // cannot create a second message or regain broader employee privileges.
-    await call("complete", { job: job.id, lease: job.lease, device: agent.device, content: "duplicate\nROUTE: done" });
+    await call("complete", { job: job.id, lease: job.lease, device: agent.device, content: "duplicate\nROUTE: done",
+      contextStats: { historyChars: 100, promptChars: 80, summaryInputChars: 20, summaryOutputChars: 10, memoryReused: true, compacted: true } });
     const snapshot = await call<Snapshot>("sync");
     expect(snapshot.threads[0]?.status).toBe("resolved");
     expect(snapshot.messages.filter((message) => message.kind === "agent")).toEqual([
       expect.objectContaining({ author: agent.id, content: "@{u:Owner}\n\nContract is compatible." }),
     ]);
+    expect(snapshot.jobs[0]?.contextStats).toEqual({ historyChars: 100, promptChars: 80, summaryInputChars: 20,
+      summaryOutputChars: 10, memoryReused: true, compacted: true });
     await transport.close();
     now += 91_000;
     await expect(service.authorizeMcp(job.lease!)).rejects.toThrow("истекло");

@@ -369,7 +369,7 @@ export class CollaborationService {
       }
       case "complete": {
         const job = this.leased(s, actor, b, true);
-        if (job.status === "done") return { ok: true };
+        if (job.status === "done") { this.acceptJobContext(s, job, b); return { ok: true }; }
         requireValue(job.status === "running", "Задание уже остановлено; результат не отправлен повторно", 409);
         this.completeJob(s, job, b);
         return { ok: true };
@@ -593,19 +593,7 @@ export class CollaborationService {
     const addressed = addressReply(content, job.requestedBy, job.agent, space.members,
       s.agents.filter((a) => a.enabled && space.members.includes(a.owner)).map((a) => a.id));
     const visible = addressed.content, route = addressed.route;
-    if (job.contextThrough && thread.revision === job.revision) {
-      const memory = acceptMemory(this.context(s, job), b.memory, job.agent, this.now());
-      if (memory) thread.memory = memory;
-    }
-    if (b.contextStats && typeof b.contextStats === "object") {
-      const stats = b.contextStats as ContextStats;
-      if ([stats.historyChars, stats.promptChars, stats.summaryInputChars, stats.summaryOutputChars]
-        .every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 100_000_000)
-        && typeof stats.memoryReused === "boolean" && typeof stats.compacted === "boolean") job.contextStats = {
-          historyChars: stats.historyChars, promptChars: stats.promptChars, summaryInputChars: stats.summaryInputChars,
-          summaryOutputChars: stats.summaryOutputChars, memoryReused: stats.memoryReused, compacted: stats.compacted,
-        };
-    }
+    this.acceptJobContext(s, job, b);
     job.status = "done";
     const reply = this.message(s, thread.space, thread.id, job.agent, "agent", visible || "Обработка завершена.");
     reply.agentJob = job.id;
@@ -635,6 +623,22 @@ export class CollaborationService {
       this.notice(s, thread.owner, "Обсуждение завершено", thread.title, thread.space, thread.id, reply.channel, reply.id);
     } else this.wait(s, thread, job.requestedBy, "Ответ получен без команды продолжения. Можно продолжить вручную через @упоминание.");
     return { message: reply.id, status: thread.status };
+  }
+  private acceptJobContext(s: State, job: Job, b: Record<string, unknown>): void {
+    const thread = s.threads.find((t) => t.id === job.thread)!;
+    if (job.contextThrough && thread.revision === job.revision) {
+      const memory = acceptMemory(this.context(s, job), b.memory, job.agent, this.now());
+      if (memory) thread.memory = memory;
+    }
+    if (b.contextStats && typeof b.contextStats === "object") {
+      const stats = b.contextStats as ContextStats;
+      if ([stats.historyChars, stats.promptChars, stats.summaryInputChars, stats.summaryOutputChars]
+        .every((n) => Number.isSafeInteger(n) && n >= 0 && n <= 100_000_000)
+        && typeof stats.memoryReused === "boolean" && typeof stats.compacted === "boolean") job.contextStats = {
+          historyChars: stats.historyChars, promptChars: stats.promptChars, summaryInputChars: stats.summaryInputChars,
+          summaryOutputChars: stats.summaryOutputChars, memoryReused: stats.memoryReused, compacted: stats.compacted,
+        };
+    }
   }
   private space(s: State, actor: string, id: unknown): Space {
     const space = s.spaces.find((sp) => sp.id === id && sp.members.includes(actor));

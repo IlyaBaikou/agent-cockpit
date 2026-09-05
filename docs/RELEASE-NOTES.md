@@ -1,4 +1,11 @@
-Employee-owned agents, spaces, channels and threads — pilot 0.2.15.
+Employee-owned agents, spaces, channels and threads — pilot 0.2.16.
+
+New in 0.2.16:
+
+- MCP result delivery remains idempotent while preserving the local runner's validated thread-memory checkpoint and context-size statistics when `hub_reply` publishes before the CLI process returns. No answer, handoff or model call is repeated.
+- This is a compatible coordinator/desktop hotfix for 0.2.15 with no database or credential migration. Install 0.2.16 for new pilots.
+
+Previous release: 0.2.15.
 
 New in 0.2.15:
 
